@@ -10,7 +10,7 @@ from ..com_bridge import aspen
 from ._common import walk
 
 
-def tool_flowsheet_topology() -> str:
+def tool_flowsheet_topology(random_string: str | None = None) -> str:
     """Show flowsheet topology: SOURCE --[stream]--> DEST.
 
     Returns a text diagram of all block connections.

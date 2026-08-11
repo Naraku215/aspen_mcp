@@ -227,10 +227,12 @@ def tool_set_product_stage(block_name: str, stream_name: str,
 
 
 def tool_set_column_pressure(block_name: str, top_pres: float,
-                              dp_stage: float | None = None) -> str:
+                              dp_stage: float | None = None,
+                              unit: str | None = None) -> str:
     """Set the column pressure profile."""
     try:
         def impl():
+            nonlocal top_pres, dp_stage
             tree = aspen._app.RootModel("")
             if not _is_column(tree, block_name):
                 return "Error: '" + block_name + "' is not a column block"
@@ -238,6 +240,13 @@ def tool_set_column_pressure(block_name: str, top_pres: float,
                           "Input", "PRES1")
             if pres1 is None:
                 return "Error: PRES1 not found on '" + block_name + "'"
+            from .units import convert_value
+            if unit is not None:
+                top_pres = convert_value(top_pres, unit, pres1)
+                if dp_stage is not None:
+                    dp_n = walk(tree, "Data", "Blocks", block_name, "Input", "DP_STAGE")
+                    if dp_n is not None:
+                        dp_stage = convert_value(dp_stage, unit, dp_n)
             pres1.SetValue(0, top_pres)
             msg = "Set " + block_name + " PRES1 (top pressure) = " + str(top_pres)
             if dp_stage is not None:
@@ -254,7 +263,8 @@ def tool_set_column_pressure(block_name: str, top_pres: float,
 
 def tool_set_column_specs(block_name: str, rr: float | None = None,
                            d: float | None = None, b: float | None = None,
-                           br: float | None = None) -> str:
+                           br: float | None = None,
+                           unit: str | None = None) -> str:
     """Set RadFrac operating specifications. mutates=True.
 
     Exactly 2 specs must be provided. Common combinations:
@@ -296,11 +306,16 @@ def tool_set_column_specs(block_name: str, rr: float | None = None,
                     except Exception:
                         pass
 
+            from .units import convert_value
             results = []
             for key, val in specs.items():
                 node = walk(tree, "Data", "Blocks", block_name, "Input", key)
                 if node is None:
                     return f"Error: {key} not found on '{block_name}'"
+                if unit is not None and key in ("BASIS_D", "BASIS_B"):
+                    # d/b are molar flows (kmol/sec internal); rr/br are dimensionless
+                    val = convert_value(val, unit, node)
+                    specs[key] = val
                 node.SetValue(0, val)
                 results.append(f"{key}={val}")
 

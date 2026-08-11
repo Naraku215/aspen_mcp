@@ -137,11 +137,11 @@ def _check_feeds_before_run() -> str | None:
         return aspen.call(impl)
     except Exception:
         return None
-def tool_status() -> dict:
+def tool_status(random_string: str | None = None) -> dict:
     """Return the current Aspen Plus connection / engine status."""
     return aspen.status()
 
-def tool_probe() -> dict:
+def tool_probe(random_string: str | None = None) -> dict:
     """Diagnose COM state (app, root, tree access)."""
     return aspen.probe()
 
@@ -157,14 +157,14 @@ def tool_open_file(file_path: str) -> str:
         if "RPC" in exc_str:
             return "COM error: " + str(exc) + ". Try close_file() then open_file() again."
         return "Error: " + str(exc)
-def tool_close_file() -> str:
+def tool_close_file(random_string: str | None = None) -> str:
     """Close the currently-open simulation file."""
     try:
         aspen.close_file()
         return "File closed"
     except Exception as exc:
         return "Error: " + str(exc)
-def tool_run() -> str:
+def tool_run(random_string: str | None = None) -> str:
     """Run the simulation (synchronous) and return convergence diagnostics."""
     try:
         feed_ok = _check_feeds_before_run()
@@ -182,7 +182,7 @@ def tool_run() -> str:
         if "RPC" in exc_str or chr(26381) in exc_str:
             return "COM error: " + str(exc) + ". Try close_file() then open_file() to recover, then reinit_and_run()."
         return "Error: " + str(exc)
-def tool_run_async() -> str:
+def tool_run_async(random_string: str | None = None) -> str:
     """Run the simulation (asynchronous, non-blocking)."""
     try:
         aspen.run_async()
@@ -196,14 +196,14 @@ def tool_save(file_path: str | None = None) -> str:
         return "Saved to " + str(file_path) if file_path else "File saved"
     except Exception as exc:
         return "Error: " + str(exc)
-def tool_reinit() -> str:
+def tool_reinit(random_string: str | None = None) -> str:
     """Reinitialize the simulation (reset results before re-running)."""
     try:
         aspen.reinit()
         return "Simulation reinitialized"
     except Exception as exc:
         return "Error: " + str(exc)
-def tool_reinit_and_run() -> str:
+def tool_reinit_and_run(random_string: str | None = None) -> str:
     """Reinitialize then run synchronously.
     Reinit() clears old engine caches so Aspen rebuilds calculation order;
     Run2(0) executes synchronously.
@@ -224,7 +224,7 @@ def tool_reinit_and_run() -> str:
         if "RPC" in exc_str or chr(26381) in exc_str:
             return "COM error: " + str(exc) + ". Try close_file() then open_file() to recover, then reinit_and_run() again."
         return "Error: " + str(exc)
-def tool_new_simulation() -> str:
+def tool_new_simulation(random_string: str | None = None) -> str:
     """创建一个新的空白模拟。
 
     使用 Aspen 内置的 InitNew() 创建空白模拟，
@@ -246,7 +246,7 @@ def tool_new_simulation() -> str:
         return "Error: " + str(exc)
 
 
-def tool_stop_simulation() -> str:
+def tool_stop_simulation(random_string: str | None = None) -> str:
     """Stop the currently running simulation."""
     try:
         aspen.stop()

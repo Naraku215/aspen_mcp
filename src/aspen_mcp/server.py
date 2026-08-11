@@ -127,14 +127,14 @@ def create_server() -> FastMCP:
     # ── simulation ───────────────────────────────────────────────────────
 
     @mcp.tool()
-    def status() -> dict:
+    def status(random_string: str | None = None) -> dict:
         """获取 Aspen Plus 连接和引擎状态。"""
-        return tool_status()
+        return tool_status(random_string)
 
     @mcp.tool()
-    def probe() -> dict:
+    def probe(random_string: str | None = None) -> dict:
         """Diagnose COM state (app, root, tree access)."""
-        return tool_probe()
+        return tool_probe(random_string)
 
     @mcp.tool()
     def open_file(file_path: str) -> str:
@@ -148,12 +148,12 @@ def create_server() -> FastMCP:
         return tool_open_file(file_path)
 
     @mcp.tool()
-    def close_file() -> str:
+    def close_file(random_string: str | None = None) -> str:
         """Close the currently open simulation file. mutates=True."""
-        return tool_close_file()
+        return tool_close_file(random_string)
 
     @mcp.tool()
-    def run() -> str:
+    def run(random_string: str | None = None) -> str:
         """Run the simulation. mutates=True.
 
         Auto-checks feed streams for missing TEMP/PRES/composition.
@@ -164,12 +164,12 @@ def create_server() -> FastMCP:
           block_status("name")          — convergence status
           diagnose(["convergence"])      — failure analysis
         """
-        return tool_run()
+        return tool_run(random_string)
 
     @mcp.tool()
-    def run_async() -> str:
+    def run_async(random_string: str | None = None) -> str:
         """运行模拟（异步）。"""
-        return tool_run_async()
+        return tool_run_async(random_string)
 
     @mcp.tool()
     def save(file_path: str | None = None) -> str:
@@ -181,21 +181,21 @@ def create_server() -> FastMCP:
         return tool_save(file_path)
 
     @mcp.tool()
-    def reinit() -> str:
+    def reinit(random_string: str | None = None) -> str:
         """重新初始化模拟（重置结果）。"""
-        return tool_reinit()
+        return tool_reinit(random_string)
 
     @mcp.tool()
-    def reinit_and_run() -> str:
+    def reinit_and_run(random_string: str | None = None) -> str:
         """Reinitialize (clear results) then run. mutates=True.
 
         Equivalent to reinit() + run(). Preferred over run()
         when you have changed parameters and need a clean start.
         """
-        return tool_reinit_and_run()
+        return tool_reinit_and_run(random_string)
 
     @mcp.tool()
-    def new_simulation() -> str:
+    def new_simulation(random_string: str | None = None) -> str:
         """Create a blank simulation with 0 components and empty topology.
 
         mutates=True. Creates fresh sim with PENG-ROB property method.
@@ -206,12 +206,12 @@ def create_server() -> FastMCP:
           add_block("H1","HEATER") -> add_stream("FEED")
           set_stream_param("FEED","TEMP",25) -> run()
         """
-        return tool_new_simulation()
+        return tool_new_simulation(random_string)
 
     @mcp.tool()
-    def stop_simulation() -> str:
+    def stop_simulation(random_string: str | None = None) -> str:
         """停止当前运行的模拟。"""
-        return tool_stop_simulation()
+        return tool_stop_simulation(random_string)
 
     @mcp.tool()
     def visible(show: bool) -> str:
@@ -231,13 +231,13 @@ def create_server() -> FastMCP:
     # ── streams ──────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def list_all_streams() -> list[str]:
+    def list_all_streams(random_string: str | None = None) -> list[str]:
         """List every stream name in the flowsheet.
 
         Returns: ["FEED","PRODUCT","RECYCLE",...].
         Use get_stream("name") for individual results.
         """
-        return tool_list_all_streams()
+        return tool_list_all_streams(random_string)
 
     @mcp.tool()
     def get_stream(name: str) -> dict:
@@ -257,7 +257,7 @@ def create_server() -> FastMCP:
         return tool_get_stream_composition_info(name)
 
     @mcp.tool()
-    def set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None) -> str:
+    def set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None, unit: str | None = None) -> str:
         """Set a feed-stream input parameter. mutates=True.
 
         Examples:
@@ -269,10 +269,10 @@ def create_server() -> FastMCP:
         Value unit follows the current Unit-Set (METCBAR: C/bar/kmol/hr).
         For composition, use set_stream_composition_batch.
         """
-        return tool_set_stream_param(stream_name, param, value, basis)
+        return tool_set_stream_param(stream_name, param, value, basis, unit)
 
     @mcp.tool()
-    def set_stream_composition(stream_name: str, component: str, flow: float) -> str:
+    def set_stream_composition(stream_name: str, component: str, flow: float, unit: str | None = None) -> str:
         """设置某组分的's 摩尔流量。
 
         NOTE: IDs over 8 chars get truncated (PROPYLENE -> PROPYLEN).
@@ -283,12 +283,13 @@ def create_server() -> FastMCP:
             component: Component label (confirmed via list_components).
             flow: Molar flow (unit depends on Unit-Set).
         """
-        return tool_set_stream_composition(stream_name, component, flow)
+        return tool_set_stream_composition(stream_name, component, flow, unit)
 
     @mcp.tool()
     def set_stream_composition_batch(stream_name: str, components: dict[str, float],
                                      basis: str = "MOLE-FLOW",
-                                     total_flow: float | None = None) -> str:
+                                     total_flow: float | None = None,
+                                     unit: str | None = None) -> str:
         """批量设置流股组成，带 BASIS 控制和可选总流量。
 
         Handles BASIS switching, all components, and total flow in one call.
@@ -305,7 +306,7 @@ def create_server() -> FastMCP:
             set_stream_composition_batch("FEED", {"ETHANOL": 0.5, "WATER": 0.5},
                                          basis="MOLE-FRAC", total_flow=100)
         """
-        return tool_set_stream_composition_batch(stream_name, components, basis, total_flow)
+        return tool_set_stream_composition_batch(stream_name, components, basis, total_flow, unit)
 
     @mcp.tool()
     def add_stream(name: str) -> str:
@@ -376,13 +377,13 @@ def create_server() -> FastMCP:
     # ── blocks ───────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def list_all_blocks() -> list[str]:
+    def list_all_blocks(random_string: str | None = None) -> list[str]:
         """List every block name in the flowsheet.
 
         Returns: ["H1","F1","C1","R1",...].
         Use get_block("name") for individual specifications.
         """
-        return tool_list_all_blocks()
+        return tool_list_all_blocks(random_string)
 
     @mcp.tool()
     def get_block(name: str) -> dict:
@@ -394,7 +395,8 @@ def create_server() -> FastMCP:
         return tool_get_block(name)
 
     @mcp.tool()
-    def set_param(block_name: str, param: str, value: str | float) -> str:
+    def set_param(block_name: str, param: str, value: str | float,
+              unit: str | None = None) -> str:
         """Set a block operating parameter. mutates=True.
 
         Common params: TEMP, PRES, DUTY, VFRAC, NPHASE.
@@ -408,7 +410,7 @@ def create_server() -> FastMCP:
         For streams, use set_stream_param. Streams and blocks have
         separate parameter trees in the Aspen COM object model.
         """
-        return tool_set_param(block_name, param, value)
+        return tool_set_param(block_name, param, value, unit)
 
     @mcp.tool()
     def add_block(name: str, block_type: str) -> str:
@@ -458,13 +460,13 @@ def create_server() -> FastMCP:
     # ── components / property ───────────────────────────────────────────────
 
     @mcp.tool()
-    def list_components() -> list[str]:
+    def list_components(random_string: str | None = None) -> list[str]:
         """List all components in the simulation.
 
         Returns: ["WATER","ETHANOL","..."] — the Aspen-internal labels.
         Use these labels in add_reaction, set_stream_composition, etc.
         """
-        return tool_list_components()
+        return tool_list_components(random_string)
 
     @mcp.tool()
     def add_component(component_id: str) -> str:
@@ -491,12 +493,12 @@ def create_server() -> FastMCP:
         return tool_remove_component(component_id)
 
     @mcp.tool()
-    def get_property_method() -> str:
+    def get_property_method(random_string: str | None = None) -> str:
         """Get the current global property method.
 
         Returns: "PENG-ROB", "NRTL", "NRTL-RK", etc.
         """
-        return tool_get_property_method()
+        return tool_get_property_method(random_string)
 
     @mcp.tool()
     def set_property_method(method: str) -> str:
@@ -509,9 +511,9 @@ def create_server() -> FastMCP:
         return tool_set_property_method(method)
 
     @mcp.tool()
-    def get_unit_set() -> str:
+    def get_unit_set(random_string: str | None = None) -> str:
         """Get the current global unit set (e.g. ENG, METCBAR, SI)."""
-        return tool_get_unit_set()
+        return tool_get_unit_set(random_string)
 
     @mcp.tool()
     def set_unit_set(unit_set: str) -> str:
@@ -562,19 +564,19 @@ def create_server() -> FastMCP:
         return tool_remove_reaction(reaction_set, reaction_no)
 
     @mcp.tool()
-    def list_reaction_sets() -> list[str]:
+    def list_reaction_sets(random_string: str | None = None) -> list[str]:
         """List all reaction sets."""
-        return tool_list_reaction_sets()
+        return tool_list_reaction_sets(random_string)
 
     # ── flowsheet topology ───────────────────────────────────────────────
 
     @mcp.tool()
-    def flowsheet_topology() -> str:
+    def flowsheet_topology(random_string: str | None = None) -> str:
         """Show flowsheet topology: SOURCE --[stream]--> DEST.
 
         Returns a text diagram of all block connections.
         """
-        return tool_flowsheet_topology()
+        return tool_flowsheet_topology(random_string)
 
     @mcp.tool()
     def add_side_duty(block_name: str, stage: int, duty: float) -> str:
@@ -667,46 +669,47 @@ def create_server() -> FastMCP:
         return tool_generate_input_summary(file_path)
 
     @mcp.tool()
-    def find_incomplete_inputs() -> str:
+    def find_incomplete_inputs(random_string: str | None = None) -> str:
         """Find incomplete inputs grouped by severity.
 
         Categories: Critical (must fill) / Mode-irrelevant / Optional.
         Call fill_trivial_params() first to reduce noise.
         """
-        return tool_find_incomplete_inputs()
+        return tool_find_incomplete_inputs(random_string)
 
     # -- tear streams -------------------------------------------------------
 
     @mcp.tool()
-    def list_tear_streams() -> list[str]:
+    def list_tear_streams(random_string: str | None = None) -> list[str]:
         """List all tear streams (recycle loops) in the simulation.
 
         Each tear stream is Aspen's "guess point" for a recycle loop.
         Use set_tear_estimate() to provide better initial values.
         """
-        return tool_list_tear_streams()
+        return tool_list_tear_streams(random_string)
 
     @mcp.tool()
     def set_tear_estimate(stream_name: str, temp: float | None = None,
                            pres: float | None = None,
-                           total_flow: float | None = None) -> str:
+                           total_flow: float | None = None,
+                           unit: str | None = None) -> str:
         """Set initial estimates for a tear (recycle) stream. mutates=True.
 
         set_tear_estimate("RECYCLE", temp=200, pres=2, total_flow=50)
 
         Good estimates speed up convergence in recycle loops.
         """
-        return tool_set_tear_estimate(stream_name, temp, pres, total_flow)
+        return tool_set_tear_estimate(stream_name, temp, pres, total_flow, unit)
 
     # -- simulation warnings -------------------------------------------------
 
     @mcp.tool()
-    def simulation_warnings() -> list[str]:
+    def simulation_warnings(random_string: str | None = None) -> list[str]:
         """Scan for common issues: pressure mismatches, disconnected feeds.
 
         Call before run() to catch obvious configuration errors.
         """
-        return tool_simulation_warnings()
+        return tool_simulation_warnings(random_string)
 
     @mcp.tool()
     def validate_block(block_name: str) -> str:
@@ -718,13 +721,13 @@ def create_server() -> FastMCP:
         return tool_validate_block(block_name)
 
     @mcp.tool()
-    def fill_trivial_params() -> str:
+    def fill_trivial_params(random_string: str | None = None) -> str:
         """Fill harmless active-but-unset params with safe defaults.
 
         Call BEFORE find_incomplete_inputs() to reduce noise from
         COM infrastructure / UI artifacts / estimation placeholders.
         """
-        return tool_fill_trivial_params()
+        return tool_fill_trivial_params(random_string)
 
     @mcp.tool()
     def deep_probe(block_name: str = "") -> str:
@@ -790,25 +793,27 @@ def create_server() -> FastMCP:
 
     @mcp.tool()
     def set_column_pressure(block_name: str, top_pres: float,
-                             dp_stage: float | None = None) -> str:
+                             dp_stage: float | None = None,
+                             unit: str | None = None) -> str:
         """Set column pressure profile. mutates=True.
 
         set_column_pressure("C1", 5.0)               — constant 5 bar
         set_column_pressure("C1", 5.0, dp_stage=0.1) — 5 bar top, 0.1 bar/stage drop
         """
-        return tool_set_column_pressure(block_name, top_pres, dp_stage)
+        return tool_set_column_pressure(block_name, top_pres, dp_stage, unit)
 
     @mcp.tool()
     def set_column_specs(block_name: str, rr: float | None = None,
                           d: float | None = None, b: float | None = None,
-                          br: float | None = None) -> str:
+                          br: float | None = None,
+                          unit: str | None = None) -> str:
         """Set RadFrac operating specs (exactly 2 required). mutates=True.
 
         set_column_specs("C1", rr=2.0, d=7.0)   — reflux ratio + distillate
         set_column_specs("C1", rr=2.0, b=93.0)  — reflux ratio + bottoms
         set_column_specs("C1", rr=2.0, br=3.0)  — reflux ratio + boilup
         """
-        return tool_set_column_specs(block_name, rr, d, b, br)
+        return tool_set_column_specs(block_name, rr, d, b, br, unit)
 
     # -- utility tools ------------------------------------------------------------
 
@@ -818,9 +823,9 @@ def create_server() -> FastMCP:
         return tool_add_utility(utility_name, utility_type, block_name, params)
 
     @mcp.tool()
-    def list_utilities() -> list[str]:
+    def list_utilities(random_string: str | None = None) -> list[str]:
         """List all defined utilities."""
-        return tool_list_utilities()
+        return tool_list_utilities(random_string)
 
     @mcp.tool()
     def get_utility(name: str) -> dict:

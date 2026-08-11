@@ -53,14 +53,16 @@ _BLOCK_MODES: dict[str, dict] = {
                      "VFRAC": ["VFRAC"], "PRES": ["PRES"]}},
     "V-DRUM1": {"mode_param": "SPEC_OPT", "default_mode": "TP",
         "mode_map": {"TP": ["TEMP", "PRES"], "TEMP": ["TEMP"], "PRES": ["PRES"],
-                     "VFRAC": ["VFRAC"], "DUTY": ["DUTY"]}},
+                     "VFRAC": ["VFRAC"], "DUTY": ["DUTY"], "PD": ["PRES", "DUTY"]}},
     "FLASH2": {"mode_param": "SPEC_OPT", "default_mode": "TP",
         "mode_map": {"TP": ["TEMP", "PRES"], "TEMP": ["TEMP"], "PRES": ["PRES"],
-                     "VFRAC": ["VFRAC"], "DUTY": ["DUTY"]}},
-    "ICON2": {"mode_param": "SPEC_OPT", "default_mode": "TEMP",
-        "mode_map": {"TEMP": ["TEMP"], "DUTY": ["DUTY"]}},
-    "COMPR": {"mode_param": "SPEC_OPT", "default_mode": "TEMP",
-        "mode_map": {"TEMP": ["TEMP"], "DUTY": ["DUTY"], "PRES": ["PRES"], "DELP": ["DELP"]}},
+                     "VFRAC": ["VFRAC"], "DUTY": ["DUTY"], "PD": ["PRES", "DUTY"]}},
+    "ICON2": {"mode_param": "OPT_SPEC", "default_mode": "PRES",
+        "mode_map": {"PRES": ["PRES", "SEFF"], "TEMP": ["TEMP", "SEFF"],
+                     "DUTY": ["DUTY", "SEFF"]}},
+    "COMPR": {"mode_param": "OPT_SPEC", "default_mode": "PRES",
+        "mode_map": {"PRES": ["PRES", "SEFF"], "TEMP": ["TEMP", "SEFF"],
+                     "DUTY": ["DUTY", "SEFF"]}},
 }
 
 
@@ -344,7 +346,7 @@ def tool_generate_input_summary(file_path: str) -> str:
         return f"Error: {exc}"
 
 
-def tool_list_tear_streams() -> list[str]:
+def tool_list_tear_streams(random_string: str | None = None) -> list[str]:
     """List all tear streams in the simulation (recycle loops)."""
     try:
         def impl():
@@ -412,7 +414,8 @@ def tool_list_tear_streams() -> list[str]:
 
 def tool_set_tear_estimate(stream_name: str, temp: float | None = None,
                             pres: float | None = None,
-                            total_flow: float | None = None) -> str:
+                            total_flow: float | None = None,
+                            unit: str | None = None) -> str:
     """Set initial estimate for a tear (recycle) stream.
 
     Args:
@@ -422,6 +425,18 @@ def tool_set_tear_estimate(stream_name: str, temp: float | None = None,
         total_flow: Estimated total molar flow (kmol/hr).
     """
     try:
+        # Unit conversion: use known internal units (no COM walk needed).
+        # Aspen's PRES\MIXED and TOTAL\MIXED nodes on un-run streams have
+        # UnitString="K" (default), so reading node.UnitString is unreliable.
+        if unit is not None:
+            from .units import convert_by_name
+            if temp is not None:
+                temp = convert_by_name(temp, unit, "K")
+            if pres is not None:
+                pres = convert_by_name(pres, unit, "N/SQM")
+            if total_flow is not None:
+                total_flow = convert_by_name(total_flow, unit, "KMOL/SEC")
+
         parts = []
         if temp is not None:
             aspen.set_value(temp, "Data", "Streams", stream_name, "Input", "TEMP", "MIXED")
@@ -443,7 +458,7 @@ def tool_set_tear_estimate(stream_name: str, temp: float | None = None,
 # --- 查找未完成输入 ---------------------------------------------------------
 
 
-def tool_find_incomplete_inputs() -> str:
+def tool_find_incomplete_inputs(random_string: str | None = None) -> str:
     """Scan the simulation for incomplete input nodes.
 
     Uses smart categorization per block type:
@@ -563,7 +578,7 @@ def tool_validate_block(block_name: str) -> str:
 
 
 
-def tool_simulation_warnings() -> list[str]:
+def tool_simulation_warnings(random_string: str | None = None) -> list[str]:
     """Scan for common config issues and return warnings."""
     try:
         def impl():

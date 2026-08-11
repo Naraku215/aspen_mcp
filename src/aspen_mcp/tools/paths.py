@@ -30,10 +30,18 @@ def tool_set_value(path: str, value: str | float, unit: str | None = None) -> st
     """
     try:
         def impl():
+            nonlocal value
             tree = aspen._app.RootModel("")
             node = tree.FindNode(path)
             if node is None:
                 return "Error: Path not found"
+            # Unit conversion: if unit given and value is numeric, convert to internal SI
+            if unit is not None and not isinstance(value, str):
+                from .units import convert_value
+                try:
+                    value = convert_value(value, unit, node)
+                except ValueError as ve:
+                    return f"Error: {ve}"
             # If node has children and value is a string, try matching child.
             # Accessing .Elements on a leaf node throws COM error 2010
             # ("list operation on leaf node") — must be wrapped in try/except.

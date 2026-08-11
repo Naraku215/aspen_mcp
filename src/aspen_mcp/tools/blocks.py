@@ -43,7 +43,7 @@ def _read_block_table_on_com(node: Any) -> dict[str, Any]:
     return data
 
 
-def tool_list_all_blocks() -> list[str]:
+def tool_list_all_blocks(random_string: str | None = None) -> list[str]:
     """List all block names in the flowsheet."""
     try:
         def impl():
@@ -93,7 +93,8 @@ _VALVE_ALIASES = {
     "PRES1": "P_OUT",
 }
 
-def tool_set_param(block_name: str, param: str, value: str | float) -> str:
+def tool_set_param(block_name: str, param: str, value: str | float,
+                   unit: str | None = None) -> str:
     """Set a block operating parameter. mutates=True.
 
     Common params: TEMP, PRES, DUTY, VFRAC, NPHASE.
@@ -112,6 +113,7 @@ def tool_set_param(block_name: str, param: str, value: str | float) -> str:
     """
     try:
         def impl():
+            nonlocal value
             tree = aspen._app.RootModel("")
             node = walk(tree, "Data", "Blocks", block_name, "Input", param)
             if node is None:
@@ -119,9 +121,15 @@ def tool_set_param(block_name: str, param: str, value: str | float) -> str:
                 if alias:
                     node = walk(tree, "Data", "Blocks", block_name, "Input", alias)
                     if node is not None:
+                        if unit is not None and not isinstance(value, str):
+                            from .units import convert_value
+                            value = convert_value(value, unit, node)
                         node.SetValue(0, value)
                         return f"Set {block_name}.{alias} = {value} (via alias '{param}')"
                 return f"Could not set {block_name}.{param}"
+            if unit is not None and not isinstance(value, str):
+                from .units import convert_value
+                value = convert_value(value, unit, node)
             node.SetValue(0, value)
 
             # HEATER auto-mode-switch: when TEMP is set, ensure SPEC_OPT=CONST-TEMP

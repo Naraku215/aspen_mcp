@@ -10,7 +10,7 @@ from ._common import walk
 # execute on the dedicated COM apartment thread (STA).
 
 
-def tool_list_components() -> list[str]:
+def tool_list_components(random_string: str | None = None) -> list[str]:
     """List all components in the simulation."""
     try:
         def impl():
@@ -138,7 +138,7 @@ def tool_remove_component(component_id: str) -> str:
 # --- Property method --------------------------------------------------------
 
 
-def tool_get_property_method() -> str:
+def tool_get_property_method(random_string: str | None = None) -> str:
     """Get the current global property method (e.g. PENG-ROB, NRTL)."""
     try:
         def impl():
@@ -172,7 +172,7 @@ def tool_set_property_method(method: str) -> str:
 # --- Unit set ----------------------------------------------------------------
 
 
-def tool_get_unit_set() -> str:
+def tool_get_unit_set(random_string: str | None = None) -> str:
     """Get the current global unit set (e.g. ENG, METCBAR, SI)."""
     try:
         def impl():

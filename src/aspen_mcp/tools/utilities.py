@@ -243,7 +243,7 @@ def tool_batch_add_utilities(
         return f"Error: {exc}"
 
 
-def tool_list_utilities() -> list[str]:
+def tool_list_utilities(random_string: str | None = None) -> list[str]:
     """List all defined utilities."""
     try:
         def impl():

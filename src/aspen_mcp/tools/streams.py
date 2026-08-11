@@ -40,7 +40,7 @@ def _collect_values_on_com(node: Any, max_keys: int = 80) -> dict[str, Any]:
 
 
 
-def tool_list_all_streams() -> list[str]:
+def tool_list_all_streams(random_string: str | None = None) -> list[str]:
     """List all stream names in the flowsheet."""
     try:
         def impl():
@@ -132,7 +132,7 @@ def tool_get_stream_composition_info(name: str) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-def tool_set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None) -> str:
+def tool_set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None, unit: str | None = None) -> str:
     """Set a stream input parameter (TEMP, PRES, TOTAL, or component flow).
 
     Auto-handles MIXED sub-node writing. Response auto-reports unit
@@ -167,6 +167,15 @@ def tool_set_stream_param(stream_name: str, param: str, value: float, basis: str
             if err:
                 return f"Warning: could not set BASIS: {err}"
 
+        if unit is not None:
+            def _conv_sp():
+                tree = aspen._app.RootModel("")
+                from .units import convert_value
+                node = walk(tree, "Data", "Streams", stream_name, "Input", param)
+                if node is None:
+                    raise ValueError(f"stream '{stream_name}' param '{param}' not found for unit conversion")
+                return convert_value(value, unit, node)
+            value = aspen.call(_conv_sp)
         ok = aspen.set_stream_param(stream_name, param, value)
         if ok:
             msg = f"Stream '{stream_name}' {param} = {value}"
@@ -189,7 +198,7 @@ def tool_set_stream_param(stream_name: str, param: str, value: float, basis: str
         return f"Error: {exc}"
 
 
-def tool_set_stream_composition(stream_name: str, component: str, flow: float) -> str:
+def tool_set_stream_composition(stream_name: str, component: str, flow: float, unit: str | None = None) -> str:
     """Set a component's molar flow in a stream.
 
     Args:
@@ -202,6 +211,15 @@ def tool_set_stream_composition(stream_name: str, component: str, flow: float) -
     as Aspen truncates IDs > 8 chars internally (e.g. PROPYLENE -> PROPYLEN).
     """
     try:
+        if unit is not None:
+            def _conv_sc():
+                tree = aspen._app.RootModel("")
+                from .units import convert_value
+                node = walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", component)
+                if node is None:
+                    raise ValueError(f"component '{component}' not found in stream '{stream_name}' for unit conversion")
+                return convert_value(flow, unit, node)
+            flow = aspen.call(_conv_sc)
         ok = aspen.set_stream_composition(stream_name, component, flow)
         if ok:
             return f"Stream '{stream_name}' component '{component}' flow = {flow}"
@@ -229,7 +247,8 @@ def tool_add_stream(name: str) -> str:
 
 def tool_set_stream_composition_batch(stream_name: str, components: dict[str, float],
                                       basis: str = "MOLE-FLOW",
-                                      total_flow: float | None = None) -> str:
+                                      total_flow: float | None = None,
+                                      unit: str | None = None) -> str:
     """Batch-set stream composition with BASIS control and optional total flow.
 
     Args:
@@ -249,6 +268,28 @@ def tool_set_stream_composition_batch(stream_name: str, components: dict[str, fl
         is_frac = "FRAC" in bn.upper()
         if is_frac and total_flow is None:
             return f"Error: {basis} requires total_flow parameter."
+
+        # Unit conversion: if unit given, convert each component flow to SI
+        if unit is not None:
+            from .units import convert_value
+            converted = {}
+            for comp, flow_val in components.items():
+                def _conv_comp(cv=comp, fv=flow_val):
+                    tree = aspen._app.RootModel("")
+                    node = walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", cv)
+                    if node is None:
+                        raise ValueError(f"component '{cv}' not found in stream '{stream_name}'")
+                    return convert_value(fv, unit, node)
+                converted[comp] = aspen.call(_conv_comp)
+            components = converted
+            if total_flow is not None:
+                def _conv_total(tv=total_flow):
+                    tree = aspen._app.RootModel("")
+                    node = walk(tree, "Data", "Streams", stream_name, "Input", "TOTAL", "MIXED")
+                    if node is None:
+                        raise ValueError(f"stream '{stream_name}' TOTAL node not found")
+                    return convert_value(tv, unit, node)
+                total_flow = aspen.call(_conv_total)
 
         # Delegate to bridge (now properly implemented)
         result = aspen.set_stream_composition_batch(

@@ -283,7 +283,7 @@ def tool_remove_reaction(reaction_set: str, reaction_no: int) -> str:
         return f"Error: {exc}"
 
 
-def tool_list_reaction_sets() -> list[str]:
+def tool_list_reaction_sets(random_string: str | None = None) -> list[str]:
     """List all reaction sets."""
     try:
         def impl():

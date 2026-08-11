@@ -166,7 +166,7 @@ _TRIVIAL_PARAMS: dict[str, int | str] = {
 }
 
 
-def tool_fill_trivial_params() -> str:
+def tool_fill_trivial_params(random_string: str | None = None) -> str:
     """Fill trivial/meaningless active-but-unset params across all blocks.
 
     Many parameters show up in find_incomplete_inputs() because they are
