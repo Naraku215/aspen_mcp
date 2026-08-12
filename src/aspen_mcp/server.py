@@ -266,7 +266,12 @@ def create_server() -> FastMCP:
           set_stream_param("FEED", "TOTAL", 100)      — total molar flow
           set_stream_param("S1", "VFRAC", 0.0)        — vapor fraction
 
-        Value unit follows the current Unit-Set (METCBAR: C/bar/kmol/hr).
+        Values are always stored in internal SI (K, Pa, kmol/s) regardless of
+        the display Unit-Set. For engineering units pass the unit param, the
+        tool converts: set_stream_param("FEED","TEMP",25,unit="C"),
+        set_stream_param("FEED","PRES",1.5,unit="bar"),
+        set_stream_param("FEED","TOTAL",100,unit="kmol/hr").
+        Without unit the value is taken as SI.
         For composition, use set_stream_composition_batch.
         """
         return tool_set_stream_param(stream_name, param, value, basis, unit)
@@ -281,7 +286,8 @@ def create_server() -> FastMCP:
         Args:
             stream_name: Stream name.
             component: Component label (confirmed via list_components).
-            flow: Molar flow (unit depends on Unit-Set).
+            flow: Molar flow. Stored in internal SI (kmol/s); for engineering
+                units pass the unit param (e.g. unit="kmol/hr"), the tool converts.
         """
         return tool_set_stream_composition(stream_name, component, flow, unit)
 
@@ -406,6 +412,10 @@ def create_server() -> FastMCP:
           set_param("H1", "PRES", 5)         -- operating pressure
           set_param("F1", "TEMP", 80)        -- flash temperature
           set_param("H1", "DUTY", -500)      -- heat duty (neg=cooling)
+
+        Values are stored in internal SI (K, Pa, W). For engineering units
+        pass the unit param: set_param("H1","TEMP",150,unit="C"),
+        set_param("H1","PRES",5,unit="bar"). Without unit, value = SI.
 
         For streams, use set_stream_param. Streams and blocks have
         separate parameter trees in the Aspen COM object model.
@@ -606,6 +616,9 @@ def create_server() -> FastMCP:
         """Write a value by Aspen COM path. mutates=True.
 
         set_value("\\Data\\Blocks\\H1\\Input\\TEMP", 150)
+
+        Values are stored in internal SI. For engineering units pass the unit
+        param: set_value(path, 150, unit="C"). Without unit, value = SI.
         """
         return tool_set_value(path, value, unit)
 
@@ -698,6 +711,11 @@ def create_server() -> FastMCP:
         set_tear_estimate("RECYCLE", temp=200, pres=2, total_flow=50)
 
         Good estimates speed up convergence in recycle loops.
+        With unit param, values are converted to SI (temp->K, pres->Pa,
+        total_flow->kmol/s): set_tear_estimate("R", temp=127, unit="C").
+        Note: one unit applies to one quantity — to set temp in C and pres in
+        bar, call twice.
+        Without unit, values are taken as SI.
         """
         return tool_set_tear_estimate(stream_name, temp, pres, total_flow, unit)
 
@@ -797,8 +815,9 @@ def create_server() -> FastMCP:
                              unit: str | None = None) -> str:
         """Set column pressure profile. mutates=True.
 
-        set_column_pressure("C1", 5.0)               — constant 5 bar
-        set_column_pressure("C1", 5.0, dp_stage=0.1) — 5 bar top, 0.1 bar/stage drop
+        set_column_pressure("C1", 5.0, unit="bar")   — constant 5 bar
+        set_column_pressure("C1", 5.0, 0.1, unit="bar") — 5 bar top, 0.1 bar/stage
+        Without unit the value is taken as SI (Pa).
         """
         return tool_set_column_pressure(block_name, top_pres, dp_stage, unit)
 
@@ -812,6 +831,10 @@ def create_server() -> FastMCP:
         set_column_specs("C1", rr=2.0, d=7.0)   — reflux ratio + distillate
         set_column_specs("C1", rr=2.0, b=93.0)  — reflux ratio + bottoms
         set_column_specs("C1", rr=2.0, br=3.0)  — reflux ratio + boilup
+
+        unit applies to molar-flow specs (d/b, internal kmol/s), e.g.
+        set_column_specs("C1", rr=2.0, d=15, unit="kmol/hr"); rr/br are
+        dimensionless.
         """
         return tool_set_column_specs(block_name, rr, d, b, br, unit)
 
