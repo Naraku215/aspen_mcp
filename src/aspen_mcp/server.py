@@ -80,6 +80,7 @@ from .tools.analysis import (
 )
 from .tools.deep_probe import tool_deep_probe
 from .tools.fix_trivial import tool_fill_trivial_params
+from .tools.tables import tool_add_table_row
 from .tools.flowsheet import (
     tool_flowsheet_topology,
     tool_add_side_duty,
@@ -746,6 +747,18 @@ def create_server() -> FastMCP:
         COM infrastructure / UI artifacts / estimation placeholders.
         """
         return tool_fill_trivial_params(random_string)
+
+    @mcp.tool()
+    def add_table_row(path: str, label: str | None = None, col: int = 0) -> str:
+        """Insert a row into an existing table node (generic).
+
+        path: backslash path to the table container, e.g.
+        "\\Data\\Blocks\\RX1\\Input\\YIELD". The block and its Input
+        section must exist first. Returns the 0-based row index for
+        follow-up set_value() calls. Idempotent by label within the
+        column. Use for RYIELD/RSTOIC yield tables and any COM table.
+        """
+        return tool_add_table_row(path, label, col)
 
     @mcp.tool()
     def deep_probe(block_name: str = "") -> str:
