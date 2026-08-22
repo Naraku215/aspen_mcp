@@ -35,11 +35,20 @@ def tool_set_value(path: str, value: str | float, unit: str | None = None) -> st
             node = tree.FindNode(path)
             if node is None:
                 return "Error: Path not found"
-            # Unit conversion: if unit given and value is numeric, convert to internal SI
+            # Unit conversion: if unit given and value is numeric, convert to internal SI.
+            # Block Input nodes have empty .UnitString, so convert_value() would
+            # silently pass through. For known block params, convert by name using
+            # the known internal unit; otherwise fall back to reading the node.
             if unit is not None and not isinstance(value, str):
-                from .units import convert_value
+                from .units import convert_value, convert_by_name
+                from .blocks import _BLOCK_PARAM_UNITS
+                param_name = path.rstrip("\\").split("\\")[-1]
+                known = _BLOCK_PARAM_UNITS.get(param_name)
                 try:
-                    value = convert_value(value, unit, node)
+                    if known:
+                        value = convert_by_name(value, unit, known)
+                    else:
+                        value = convert_value(value, unit, node)
                 except ValueError as ve:
                     return f"Error: {ve}"
             # If node has children and value is a string, try matching child.

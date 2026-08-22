@@ -590,12 +590,14 @@ def create_server() -> FastMCP:
         return tool_flowsheet_topology(random_string)
 
     @mcp.tool()
-    def add_side_duty(block_name: str, stage: int, duty: float) -> str:
+    def add_side_duty(block_name: str, stage: int, duty: float,
+                      unit: str | None = None) -> str:
         """Add/update side heater/cooler duty on a column stage. mutates=True.
 
-        add_side_duty("C1", 5, -500)    — 500 kW cooling at stage 5
+        add_side_duty("C1", 5, -500, unit="kW")  — 500 kW cooling at stage 5
+        Without unit, duty is taken as SI (W).
         """
-        return tool_add_side_duty(block_name, stage, duty)
+        return tool_add_side_duty(block_name, stage, duty, unit)
 
     @mcp.tool()
     def remove_side_duty(block_name: str, stage: int) -> str:

@@ -93,6 +93,22 @@ _VALVE_ALIASES = {
     "PRES1": "P_OUT",
 }
 
+# Known internal SI units for common block parameters.
+# Block Input nodes often have empty .UnitString (unlike stream Input nodes),
+# so convert_value() silently passes through without conversion.
+# For these params, use convert_by_name() with the known internal unit instead.
+_BLOCK_PARAM_UNITS: dict[str, str] = {
+    "TEMP": "K",
+    "TEMP1": "K",
+    "TEMP2": "K",
+    "PRES": "N/SQM",
+    "PRES1": "N/SQM",
+    "PRES2": "N/SQM",
+    "P_OUT": "N/SQM",
+    "DUTY": "W",
+    "DP_STAGE": "N/SQM",
+}
+
 def tool_set_param(block_name: str, param: str, value: str | float,
                    unit: str | None = None) -> str:
     """Set a block operating parameter. mutates=True.
@@ -122,14 +138,22 @@ def tool_set_param(block_name: str, param: str, value: str | float,
                     node = walk(tree, "Data", "Blocks", block_name, "Input", alias)
                     if node is not None:
                         if unit is not None and not isinstance(value, str):
-                            from .units import convert_value
-                            value = convert_value(value, unit, node)
+                            from .units import convert_by_name, convert_value
+                            known = _BLOCK_PARAM_UNITS.get(alias)
+                            if known:
+                                value = convert_by_name(value, unit, known)
+                            else:
+                                value = convert_value(value, unit, node)
                         node.SetValue(0, value)
                         return f"Set {block_name}.{alias} = {value} (via alias '{param}')"
                 return f"Could not set {block_name}.{param}"
             if unit is not None and not isinstance(value, str):
-                from .units import convert_value
-                value = convert_value(value, unit, node)
+                from .units import convert_by_name, convert_value
+                known = _BLOCK_PARAM_UNITS.get(param)
+                if known:
+                    value = convert_by_name(value, unit, known)
+                else:
+                    value = convert_value(value, unit, node)
             node.SetValue(0, value)
 
             # HEATER auto-mode-switch: when TEMP is set, ensure SPEC_OPT=CONST-TEMP

@@ -183,10 +183,15 @@ def tool_flowsheet_topology(random_string: str | None = None) -> str:
         return f"Error: {exc}"
 
 
-def tool_add_side_duty(block_name: str, stage: int, duty: float) -> str:
-    """Add/update a side heater/cooler duty on a RadFrac stage."""
+def tool_add_side_duty(block_name: str, stage: int, duty: float,
+                         unit: str | None = None) -> str:
+    """Add/update a side heater/cooler duty on a RadFrac stage.
+
+    duty is internal SI (W) unless unit is given, e.g. unit="kW" for -500 kW.
+    """
     try:
         def impl():
+            nonlocal duty
             tree = aspen._app.RootModel("")
             # Navigate to side duties under RadFrac block
             # Path: Data\Blocks\{name}\Input\SIDE_DUTIES\{stage name}\DUTY
@@ -214,6 +219,9 @@ def tool_add_side_duty(block_name: str, stage: int, duty: float) -> str:
                               "SIDE_DUTIES", stage_name, "DUTY")
             if duty_node is None:
                 return f"DUTY node not found for stage {stage}"
+            if unit is not None:
+                from .units import convert_by_name
+                duty = convert_by_name(duty, unit, "W")
             duty_node.SetValue(0, duty)
             return f"Side duty set on {block_name} stage {stage} = {duty}"
         return aspen.call(impl)

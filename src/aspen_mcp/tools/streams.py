@@ -269,19 +269,23 @@ def tool_set_stream_composition_batch(stream_name: str, components: dict[str, fl
         if is_frac and total_flow is None:
             return f"Error: {basis} requires total_flow parameter."
 
-        # Unit conversion: if unit given, convert each component flow to SI
+        # Unit conversion: if unit given, convert flows to SI.
+        # When basis is a fraction (MOLE-FRAC / MASS-FRAC), component values
+        # are dimensionless and must NOT be unit-converted -- only total_flow
+        # is converted.  Converting fractions would divide them by 3600 etc.
         if unit is not None:
             from .units import convert_value
-            converted = {}
-            for comp, flow_val in components.items():
-                def _conv_comp(cv=comp, fv=flow_val):
-                    tree = aspen._app.RootModel("")
-                    node = walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", cv)
-                    if node is None:
-                        raise ValueError(f"component '{cv}' not found in stream '{stream_name}'")
-                    return convert_value(fv, unit, node)
-                converted[comp] = aspen.call(_conv_comp)
-            components = converted
+            if not is_frac:
+                converted = {}
+                for comp, flow_val in components.items():
+                    def _conv_comp(cv=comp, fv=flow_val):
+                        tree = aspen._app.RootModel("")
+                        node = walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", cv)
+                        if node is None:
+                            raise ValueError(f"component '{cv}' not found in stream '{stream_name}'")
+                        return convert_value(fv, unit, node)
+                    converted[comp] = aspen.call(_conv_comp)
+                components = converted
             if total_flow is not None:
                 def _conv_total(tv=total_flow):
                     tree = aspen._app.RootModel("")
