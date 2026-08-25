@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..com_bridge import aspen
 from ._common import walk
+from .units import clear_unit_cache
 
 
 # All COM operations must run inside aspen.call() lambdas so they
@@ -211,15 +212,41 @@ def tool_set_unit_set(unit_set: str) -> str:
             if node is None:
                 return "Error: GLOBDATASET node not found"
             node.SetValue(0, unit_set)
-            # Also update INSET and OUTSET
+            # Also update INSET and OUTSET.
+            # These are enum nodes: unit-set names (SI/ENG/...) live as child
+            # Elements, and direct SetValue raises. Select the matching child
+            # option like tool_set_value does; never swallow failures silently.
+            failed = []
             for key in ("INSET", "OUTSET"):
                 n = walk(tree, "Data", "Setup", "Global", "Input", key)
-                if n is not None:
+                if n is None:
+                    failed.append(f"{key}: node not found")
+                    continue
+                matched = False
+                try:
+                    if n.Elements.Count > 0:
+                        for i in range(n.Elements.Count):
+                            child = n.Elements(i)
+                            if child.Name.upper() == unit_set.upper():
+                                child.SetValue(0, unit_set)
+                                matched = True
+                                break
+                except Exception:
+                    pass  # leaf node — Elements not accessible, fall through
+                if not matched:
                     try:
                         n.SetValue(0, unit_set)
-                    except Exception:
-                        pass
-            return f"Unit set changed to {unit_set} ({info})"
-        return aspen.call(impl)
+                        matched = True
+                    except Exception as exc:
+                        failed.append(f"{key}: {exc}")
+            msg = f"Unit set changed to {unit_set} ({info})"
+            if failed:
+                msg += " | WARNING: could not set " + "; ".join(failed)
+            return msg
+        result = aspen.call(impl)
+        # The unit context may have changed even if INSET/OUTSET failed —
+        # any cached node UnitString is now stale.
+        clear_unit_cache()
+        return result
     except Exception as exc:
         return f"Error: {exc}"

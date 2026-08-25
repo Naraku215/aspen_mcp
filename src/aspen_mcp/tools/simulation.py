@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..com_bridge import aspen
 from ._common import walk
 from .analysis import _get_convergence_report
+from .units import clear_unit_cache
 
 
 def _check_all_uncalculated() -> str | None:
@@ -237,6 +238,9 @@ def tool_new_simulation(random_string: str | None = None) -> str:
         except Exception:
             # 如果已初始化（错误 2001），仅执行 reinit
             aspen.reinit()
+        # Fresh simulation = fresh unit context: cached node UnitString
+        # values from the previous document are stale.
+        clear_unit_cache()
         return ("New blank simulation created.\n"
                 "  - Components: none (add with add_component)\n"
                 "  - Property: PENG-ROB (change with set_property_method)\n"
