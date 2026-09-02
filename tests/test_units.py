@@ -1,5 +1,10 @@
 r"""Unit tests for units.py — pure function layer, no COM/Aspen required.
 
+Covers the stage-2 native-unit mechanism:
+  - convert_value / convert_by_name: python conversion table (SI bases)
+  - write_value: native SetValueAndUnit write, python fallback
+  - read_si: ValueForUnit(row, si_col) read with node.Value fallback
+
 Run with:  venv\Scripts\python.exe -m pytest tests\test_units.py -v
 Or standalone:  venv\Scripts\python.exe tests\test_units.py
 """
@@ -9,198 +14,175 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
-# ── Mock COM node ──────────────────────────────────────────────────────────
+# ── Mock COM node (native unit API surface) ───────────────────────────────
 class MockNode:
-    """Simulates a COM IHNode with .Name and .UnitString."""
-    def __init__(self, name: str = "", unit_string: str = ""):
+    """Simulates a COM IHNode with AttributeValue/SetValueAndUnit/ValueForUnit."""
+    def __init__(self, name="", row=None, value=None, unit_string=""):
         self.Name = name
         self.UnitString = unit_string
+        self.Value = value
+        self._row = row
+        self.svau_calls = []   # (value, col)
+        self.set_calls = []    # (idx, value)
+        self.vfu_calls = []    # (row, col)
+
+    def AttributeValue(self, attr):
+        if attr == 2:
+            if self._row is None:
+                raise ValueError("no row")
+            return self._row
+        if attr == 81:
+            return self.UnitString
+        raise ValueError(f"attr {attr} not simulated")
+
+    def SetValueAndUnit(self, value, col):
+        self.svau_calls.append((value, col))
+        self.Value = value
+
+    def ValueForUnit(self, row, col):
+        self.vfu_calls.append((row, col))
+        return self.Value
+
+    def SetValue(self, idx, value):
+        self.set_calls.append((idx, value))
+        self.Value = value
 
 
-# ── Import the module under test ────────────────────────────────────────────
 from aspen_mcp.tools.units import (
     convert_value,
     convert_by_name,
     _norm,
     _CONVERSIONS,
-    clear_unit_cache,
+    _UNIT_COORDS,
+    read_si,
+    write_value,
     format_conversion,
     describe_node_unit,
-    _unit_cache,
 )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────
 def _approx(v, expected, tol=1e-6):
     """Float comparison with tolerance."""
     return abs(v - expected) < tol
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  1. Temperature conversions (internal = K)
-# ═══════════════════════════════════════════════════════════════════════════
+def _raises_valueerror(fn):
+    try:
+        fn()
+    except ValueError as e:
+        return e
+    raise AssertionError("expected ValueError, got no exception")
+
+
+# ═══ 1. Temperature conversions (SI base = K) ═════════════════════════
 def test_temp_celsius():
-    node = MockNode("TEMP", "K")
-    assert _approx(convert_value(25, "C", node), 298.15)
-    assert _approx(convert_value(0, "C", node), 273.15)
-    assert _approx(convert_value(-40, "C", node), 233.15)
+    assert _approx(convert_value(25, "C"), 298.15)
+    assert _approx(convert_value(0, "C"), 273.15)
+    assert _approx(convert_value(-40, "C"), 233.15)
 
 def test_temp_fahrenheit():
-    node = MockNode("TEMP", "K")
-    assert _approx(convert_value(32, "F", node), 273.15)
-    assert _approx(convert_value(212, "F", node), 373.15)
-    assert _approx(convert_value(-40, "F", node), 233.15)
+    assert _approx(convert_value(32, "F"), 273.15)
+    assert _approx(convert_value(212, "F"), 373.15)
+    assert _approx(convert_value(-40, "F"), 233.15)
 
 def test_temp_kelvin_passthrough():
-    node = MockNode("TEMP", "K")
-    assert _approx(convert_value(298.15, "K", node), 298.15)
+    assert _approx(convert_value(298.15, "K"), 298.15)
 
 def test_temp_aliases():
-    node = MockNode("TEMP", "K")
-    assert _approx(convert_value(25, "DEGC", node), 298.15)
-    assert _approx(convert_value(32, "DEGF", node), 273.15)
-    assert _approx(convert_value(491.67, "RANKINE", node), 273.15)
+    assert _approx(convert_value(25, "DEGC"), 298.15)
+    assert _approx(convert_value(32, "DEGF"), 273.15)
+    assert _approx(convert_value(491.67, "RANKINE"), 273.15)
 
 def test_temp_celsius_long_form():
-    node = MockNode("TEMP", "K")
-    assert _approx(convert_value(100, "CELSIUS", node), 373.15)
-    assert _approx(convert_value(100, "FAHRENHEIT", node), 310.9278, tol=1e-3)
+    assert _approx(convert_value(100, "CELSIUS"), 373.15)
+    assert _approx(convert_value(100, "FAHRENHEIT"), 310.9278, tol=1e-3)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  2. Pressure conversions (internal = N/SQM = Pa)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 2. Pressure conversions (SI base = N/SQM = Pa) ══════════════════
 def test_pres_bar():
-    node = MockNode("PRES", "N/SQM")
-    assert _approx(convert_value(1, "bar", node), 100000.0)
-    assert _approx(convert_value(1.5, "BAR", node), 150000.0)
+    assert _approx(convert_value(1, "bar"), 100000.0)
+    assert _approx(convert_value(1.5, "BAR"), 150000.0)
 
 def test_pres_atm():
-    node = MockNode("PRES", "N/SQM")
-    assert _approx(convert_value(1, "atm", node), 101325.0)
+    assert _approx(convert_value(1, "atm"), 101325.0)
 
 def test_pres_psi():
-    node = MockNode("PRES", "N/SQM")
-    assert _approx(convert_value(14.696, "psi", node), 101325.0, tol=1.0)
+    assert _approx(convert_value(14.696, "psi"), 101325.0, tol=1.0)
 
 def test_pres_kpa_mpa():
-    node = MockNode("PRES", "N/SQM")
-    assert _approx(convert_value(100, "kPa", node), 100000.0)
-    assert _approx(convert_value(1, "MPa", node), 1_000_000.0)
+    assert _approx(convert_value(100, "kPa"), 100000.0)
+    assert _approx(convert_value(1, "MPa"), 1_000_000.0)
 
 def test_pres_aliases():
-    node = MockNode("PRES", "N/SQM")
-    assert _approx(convert_value(1, "mbar", node), 100.0)
-    assert _approx(convert_value(760, "mmHg", node), 101325.0, tol=1.0)
-    assert _approx(convert_value(760, "torr", node), 101325.0, tol=1.0)
-    assert _approx(convert_value(1, "bara", node), 100000.0)
+    assert _approx(convert_value(1, "mbar"), 100.0)
+    assert _approx(convert_value(760, "mmHg"), 101325.0, tol=1.0)
+    assert _approx(convert_value(760, "torr"), 101325.0, tol=1.0)
+    assert _approx(convert_value(1, "bara"), 100000.0)
 
 def test_pres_passthrough():
-    node = MockNode("PRES", "N/SQM")
-    assert _approx(convert_value(100000, "Pa", node), 100000.0)
-    assert _approx(convert_value(100000, "N/SQM", node), 100000.0)
+    assert _approx(convert_value(100000, "Pa"), 100000.0)
+    assert _approx(convert_value(100000, "N/SQM"), 100000.0)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  3. Molar flow conversions (internal = kmol/sec)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 3. Molar flow conversions (SI base = kmol/sec) ══════════════════
 def test_molar_kmolhr():
-    node = MockNode("FLOW", "KMOL/SEC")
-    assert _approx(convert_value(40, "kmol/hr", node), 40 / 3600.0)
-    assert _approx(convert_value(3600, "kmol/hr", node), 1.0)
+    assert _approx(convert_value(40, "kmol/hr"), 40 / 3600.0)
+    assert _approx(convert_value(3600, "kmol/hr"), 1.0)
 
 def test_molar_aliases():
-    node = MockNode("FLOW", "KMOL/SEC")
-    assert _approx(convert_value(40, "kmol/h", node), 40 / 3600.0)
+    assert _approx(convert_value(40, "kmol/h"), 40 / 3600.0)
 
 def test_molar_molhr():
-    node = MockNode("FLOW", "KMOL/SEC")
-    assert _approx(convert_value(3600000, "mol/hr", node), 1.0)
+    assert _approx(convert_value(3600000, "mol/hr"), 1.0)
 
 def test_molar_lbmolhr():
-    node = MockNode("FLOW", "KMOL/SEC")
-    assert _approx(convert_value(7936.64, "lbmol/hr", node), 1.0, tol=1e-3)
+    assert _approx(convert_value(7936.64, "lbmol/hr"), 1.0, tol=1e-3)
 
 def test_molar_passthrough():
-    node = MockNode("FLOW", "KMOL/SEC")
-    assert _approx(convert_value(0.01, "kmol/sec", node), 0.01)
-    assert _approx(convert_value(0.01, "kmol/s", node), 0.01)
+    assert _approx(convert_value(0.01, "kmol/sec"), 0.01)
+    assert _approx(convert_value(0.01, "kmol/s"), 0.01)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  4. Mass flow conversions (internal = kg/sec)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 4. Mass flow conversions (SI base = kg/sec) ═════════════════════
 def test_mass_kghr():
-    node = MockNode("MASSFLOW", "KG/SEC")
-    assert _approx(convert_value(3600, "kg/hr", node), 1.0)
+    assert _approx(convert_value(3600, "kg/hr"), 1.0)
 
 def test_mass_aliases():
-    node = MockNode("MASSFLOW", "KG/SEC")
-    assert _approx(convert_value(3600, "kg/h", node), 1.0)
-    assert _approx(convert_value(3.6, "t/hr", node), 1.0)
+    assert _approx(convert_value(3600, "kg/h"), 1.0)
+    assert _approx(convert_value(3.6, "t/hr"), 1.0)
 
 def test_mass_lblr():
-    node = MockNode("MASSFLOW", "KG/SEC")
-    assert _approx(convert_value(7936.64, "lb/hr", node), 1.0, tol=1e-3)
+    assert _approx(convert_value(7936.64, "lb/hr"), 1.0, tol=1e-3)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  5. Energy / duty conversions (internal = W)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 5. Energy / duty conversions (SI base = W) ══════════════════════
 def test_energy_kw_mw():
-    node = MockNode("DUTY", "W")
-    assert _approx(convert_value(1, "kW", node), 1000.0)
-    assert _approx(convert_value(1, "MW", node), 1_000_000.0)
+    assert _approx(convert_value(1, "kW"), 1000.0)
+    assert _approx(convert_value(1, "MW"), 1_000_000.0)
 
 def test_energy_kjhr():
-    node = MockNode("DUTY", "W")
-    assert _approx(convert_value(3600, "kJ/hr", node), 1000.0)
+    assert _approx(convert_value(3600, "kJ/hr"), 1000.0)
 
 def test_energy_aliases():
-    node = MockNode("DUTY", "W")
-    assert _approx(convert_value(1, "hp", node), 745.7, tol=1e-1)
-    assert _approx(convert_value(3412.14, "btu/hr", node), 1000.0, tol=0.5)
-    assert _approx(convert_value(860.42, "kcal/hr", node), 1000.0, tol=0.5)
+    assert _approx(convert_value(1, "hp"), 745.7, tol=1e-1)
+    assert _approx(convert_value(3412.14, "btu/hr"), 1000.0, tol=0.5)
+    assert _approx(convert_value(860.42, "kcal/hr"), 1000.0, tol=0.5)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  6. Pass-through cases (unit=None, dimensionless)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 6. Pass-through (unit=None) ═════════════════════════════════════
 def test_unit_none_passthrough():
-    node = MockNode("TEMP", "K")
-    assert convert_value(298.15, None, node) == 298.15
-    assert convert_value(100000, None, node) == 100000
-
-def test_empty_unitstring_passthrough():
-    """Dimensionless nodes (VFRAC, stage count) have empty UnitString."""
-    node = MockNode("VFRAC", "")
-    assert convert_value(0.5, "C", node) == 0.5  # no conversion on dimensionless
-    assert convert_value(0.5, None, node) == 0.5
+    assert convert_value(298.15, None) == 298.15
+    assert convert_value(100000, None) == 100000
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  7. Error handling
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 7. Error handling ══════════════════════════════════════════════
 def test_unknown_unit_raises():
-    node = MockNode("TEMP", "K")
-    try:
-        convert_value(25, "xyz", node)
-        assert False, "should have raised ValueError"
-    except ValueError as e:
-        assert "No unit conversion registered" in str(e)
-
-def test_unknown_node_unit_raises():
-    node = MockNode("WEIRD", "FOOBAR")
-    try:
-        convert_value(25, "C", node)
-        assert False, "should have raised ValueError"
-    except ValueError as e:
-        assert "No unit conversion registered" in str(e)
+    e = _raises_valueerror(lambda: convert_value(25, "xyz"))
+    assert "No unit conversion registered" in str(e)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  8. _norm function
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 8. _norm function ══════════════════════════════════════════════
 def test_norm_uppercase():
     assert _norm("c") == "C"
     assert _norm("bar") == "BAR"
@@ -212,60 +194,109 @@ def test_norm_strip_spaces():
     assert _norm("N / SQM") == "N/SQM"
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  9. Cache management
-# ═══════════════════════════════════════════════════════════════════════════
-def test_cache_populated_and_cleared():
-    node = MockNode("TEMP", "K")
-    _unit_cache.clear()
-    convert_value(25, "C", node)
-    assert "TEMP" in _unit_cache
-    assert _unit_cache["TEMP"] == "K"
-    clear_unit_cache()
-    assert len(_unit_cache) == 0
+# ═══ 9. Native coordinate table ═════════════════════════════════════
+def test_unit_coords_major_entries():
+    assert _UNIT_COORDS["C"] == (22, 4)
+    assert _UNIT_COORDS["F"] == (22, 2)
+    assert _UNIT_COORDS["K"] == (22, 1)
+    assert _UNIT_COORDS["BAR"] == (20, 5)
+    assert _UNIT_COORDS["MPA"] == (20, 20)
+    assert _UNIT_COORDS["KMOL/HR"] == (11, 3)
+    assert _UNIT_COORDS["KW"] == (13, 13)
+
+def test_coord_units_match_conversion_table():
+    """Every coordinated unit also has a python table entry to its SI base."""
+    si_bases = {11: "KMOL/SEC", 13: "W", 20: "N/SQM", 22: "K"}
+    for u, (row, _col) in _UNIT_COORDS.items():
+        assert (u, si_bases[row]) in _CONVERSIONS, f"{u} -> {si_bases[row]}"
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 10. format_conversion helper
-# ═══════════════════════════════════════════════════════════════════════════
-def test_format_conversion_with_unit():
-    s = format_conversion(25, "C", 298.15, "K")
-    assert "25" in s and "C" in s and "298.15" in s and "K" in s
+# ═══ 10. write_value ════════════════════════════════════════════════
+def test_write_unit_unset_uses_si_col():
+    node = MockNode("TEMP", row=22)
+    write_value(node, 300)
+    assert node.svau_calls == [(300, 1)]
 
-def test_format_conversion_without_unit():
-    s = format_conversion(298.15, None, 298.15, "K")
-    assert "298.15" in s
+def test_write_native_coord_celsius():
+    node = MockNode("TEMP", row=22)
+    write_value(node, 40, "C")
+    assert node.svau_calls == [(40, 4)]
+
+def test_write_native_coord_fahrenheit():
+    node = MockNode("TEMP", row=22)
+    write_value(node, 212, "F")
+    assert node.svau_calls == [(212, 2)]
+
+def test_write_native_coord_bar():
+    node = MockNode("PRES", row=20)
+    write_value(node, 5, "bar")
+    assert node.svau_calls == [(5, 5)]
+
+def test_write_native_coord_kmolhr():
+    node = MockNode("FLOW", row=11)
+    write_value(node, 200, "kmol/hr")
+    assert node.svau_calls == [(200, 3)]
+
+def test_write_python_fallback_hp():
+    # "hp" has no native column -> python table -> SI col write
+    node = MockNode("DUTY", row=13)
+    write_value(node, 10, "hp", base_internal="W")
+    assert len(node.svau_calls) == 1
+    v, col = node.svau_calls[0]
+    assert col == 1 and _approx(v, 7457.0)
+
+def test_write_unknown_unit_raises():
+    e = _raises_valueerror(
+        lambda: write_value(MockNode("DUTY", row=13), 10, "SNAIL/HR",
+                            base_internal="W"))
+    assert "No unit conversion registered" in str(e)
+
+def test_write_no_row_falls_back_to_setvalue():
+    node = MockNode("VFRAC", row=None)
+    write_value(node, 0.5)
+    assert node.svau_calls == []
+    assert node.set_calls == [(0, 0.5)]
+
+def test_write_svau_exception_falls_back_to_setvalue():
+    class _NoSvauNode(MockNode):
+        def SetValueAndUnit(self, value, col):
+            raise RuntimeError("SetValueAndUnit refused")
+    node = _NoSvauNode("TEMP", row=22)
+    write_value(node, 300)
+    assert node.svau_calls == []
+    assert node.set_calls == [(0, 300)]
+
+def test_write_none_node_raises():
+    e = _raises_valueerror(lambda: write_value(None, 1))
+    assert "node is None" in str(e)
+
+def test_write_node_returns_none():
+    node = MockNode("TEMP", row=22)
+    assert write_value(node, 300) is None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 11. describe_node_unit helper
-# ═══════════════════════════════════════════════════════════════════════════
-def test_describe_node_unit():
-    node = MockNode("TEMP", "K")
-    s = describe_node_unit(node)
-    assert "TEMP" in s and "K" in s
+# ═══ 11. read_si ════════════════════════════════════════════════════
+def test_read_si_with_row():
+    node = MockNode("TEMP", row=22, value=313.15)
+    assert read_si(node) == 313.15
+    assert node.vfu_calls == [(22, 1)]
+
+def test_read_si_no_row_falls_back_to_value():
+    node = MockNode("VFRAC", row=None, value=0.5)
+    assert read_si(node) == 0.5
+
+def test_read_si_vfu_exception_falls_back():
+    class _NoVfuNode(MockNode):
+        def ValueForUnit(self, row, col):
+            raise RuntimeError("ValueForUnit refused")
+    node = _NoVfuNode("TEMP", row=22, value=313.15)
+    assert read_si(node) == 313.15
+
+def test_read_si_none_node():
+    assert read_si(None) is None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 12. Conversion table completeness sanity
-# ═══════════════════════════════════════════════════════════════════════════
-def test_conversion_table_has_all_categories():
-    """Verify the table covers all 5 physical quantity categories."""
-    temps = [k for k in _CONVERSIONS if k[1] == "K"]
-    press = [k for k in _CONVERSIONS if k[1] == "N/SQM"]
-    molar = [k for k in _CONVERSIONS if k[1] == "KMOL/SEC"]
-    mass = [k for k in _CONVERSIONS if k[1] == "KG/SEC"]
-    energy = [k for k in _CONVERSIONS if k[1] == "W"]
-    assert len(temps) >= 6, f"temperature: only {len(temps)} entries"
-    assert len(press) >= 10, f"pressure: only {len(press)} entries"
-    assert len(molar) >= 5, f"molar flow: only {len(molar)} entries"
-    assert len(mass) >= 5, f"mass flow: only {len(mass)} entries"
-    assert len(energy) >= 6, f"energy: only {len(energy)} entries"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 13. convert_by_name (no COM node needed — uses known internal units)
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══ 12. convert_by_name ════════════════════════════════════════════
 def test_convert_by_name_temp():
     assert _approx(convert_by_name(25, "C", "K"), 298.15)
     assert _approx(convert_by_name(0, "C", "K"), 273.15)
@@ -282,21 +313,54 @@ def test_convert_by_name_none_passthrough():
     assert convert_by_name(298.15, None, "K") == 298.15
     assert convert_by_name(100000, None, "N/SQM") == 100000
 
+def test_convert_by_name_same_unit_passthrough():
+    # Bug-4 regression: same-unit pairs must NOT go through the table
+    assert convert_by_name(5.0, "F", "F") == 5.0
+    assert convert_by_name(1.0, "bar", "BAR") == 1.0
+    assert convert_by_name(2.0, "degC", "DEGC") == 2.0
+    assert convert_by_name(0.5, "kmol/hr", "KMOL/HR") == 0.5
+
 def test_convert_by_name_alias():
     assert _approx(convert_by_name(25, "degC", "K"), 298.15)
     assert _approx(convert_by_name(40, "kmol/h", "KMOL/SEC"), 40 / 3600.0)
 
 def test_convert_by_name_error():
-    try:
-        convert_by_name(25, "xyz", "K")
-        assert False, "should have raised"
-    except ValueError as e:
-        assert "No unit conversion registered" in str(e)
+    e = _raises_valueerror(lambda: convert_by_name(25, "xyz", "K"))
+    assert "No unit conversion registered" in str(e)
+
+
+# ═══ 13. format_conversion / describe_node_unit ═════════════════════
+def test_format_conversion_with_unit():
+    s = format_conversion(25, "C", 298.15, "K")
+    assert "25" in s and "C" in s and "298.15" in s and "K" in s
+
+def test_format_conversion_without_unit():
+    s = format_conversion(298.15, None, 298.15, "K")
+    assert "298.15" in s
+
+def test_describe_node_unit():
+    node = MockNode("TEMP", unit_string="K")
+    s = describe_node_unit(node)
+    assert "TEMP" in s and "K" in s
+
+
+# ═══ 14. Conversion table completeness sanity ═══════════════════════
+def test_conversion_table_has_all_categories():
+    """Verify the table covers all 5 physical quantity categories."""
+    temps = [k for k in _CONVERSIONS if k[1] == "K"]
+    press = [k for k in _CONVERSIONS if k[1] == "N/SQM"]
+    molar = [k for k in _CONVERSIONS if k[1] == "KMOL/SEC"]
+    mass = [k for k in _CONVERSIONS if k[1] == "KG/SEC"]
+    energy = [k for k in _CONVERSIONS if k[1] == "W"]
+    assert len(temps) >= 6, f"temperature: only {len(temps)} entries"
+    assert len(press) >= 10, f"pressure: only {len(press)} entries"
+    assert len(molar) >= 5, f"molar flow: only {len(molar)} entries"
+    assert len(mass) >= 5, f"mass flow: only {len(mass)} entries"
+    assert len(energy) >= 6, f"energy: only {len(energy)} entries"
 
 
 # ── Standalone runner ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Run all test functions when executed directly (no pytest needed)
     import traceback
     tests = [(name, fn) for name, fn in sorted(globals().items())
             if name.startswith("test_") and callable(fn)]

@@ -1,7 +1,10 @@
-r"""Tests for the two unit-conversion bug fixes.
+r"""Regression tests for the unit-conversion bug fixes (stage-2 semantics).
 
-Bug 1: set_param block params -- convert_by_name with known internal units
-Bug 2: set_stream_composition_batch fractions -- is_frac guard
+Bug 1: block params convert even when the node carries no UnitString
+       (now handled natively by units.write_value with the known-unit map)
+Bug 2: fraction compositions must not be unit-converted (guard lives in
+       bridge.WindowsBridge.set_stream_composition_batch: batch_is_frac)
+Bug 4: same-unit convert_by_name must pass through unchanged
 
 Run:  venv\Scripts\python.exe -m pytest tests\test_bugfix_units.py -v
 Or:   venv\Scripts\python.exe tests\test_bugfix_units.py
@@ -10,228 +13,150 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aspen_mcp.tools.units import (
-    convert_by_name, convert_value, _norm,
-    clear_unit_cache,
+    convert_by_name, convert_value, _norm, write_value,
 )
+from aspen_mcp.tools.blocks import _BLOCK_PARAM_UNITS
 
 
 class MockNode:
-    """Simulates a COM IHNode with .Name and .UnitString."""
-    def __init__(self, name="", unit_string=""):
+    """COM IHNode stand-in with the native unit API surface."""
+    def __init__(self, name="", row=None, unit_string=""):
         self.Name = name
         self.UnitString = unit_string
+        self.Value = None
+        self._row = row
+        self.svau_calls = []
+        self.set_calls = []
+        self.vfu_calls = []
+
+    def AttributeValue(self, attr):
+        if attr == 2:
+            if self._row is None:
+                raise ValueError("no row")
+            return self._row
+        if attr == 81:
+            return self.UnitString
+        raise ValueError(f"attr {attr} not simulated")
+
+    def SetValueAndUnit(self, value, col):
+        self.svau_calls.append((value, col))
+        self.Value = value
+
+    def ValueForUnit(self, row, col):
+        self.vfu_calls.append((row, col))
+        return self.Value
+
+    def SetValue(self, idx, value):
+        self.set_calls.append((idx, value))
+        self.Value = value
 
 
 def _approx(v, expected, tol=1e-6):
     return abs(v - expected) < tol
 
 
-# == Bug 1: set_param block params ==
+# == Bug 1: block params via write_value (native col OR python fallback) ==
 
-_BLOCK_PARAM_UNITS = {
-    "TEMP": "K",
-    "TEMP1": "K",
-    "PRES": "N/SQM",
-    "PRES1": "N/SQM",
-    "P_OUT": "N/SQM",
-    "DUTY": "W",
-    "DP_STAGE": "N/SQM",
-}
+_ROWS = {"TEMP": 22, "TEMP1": 22, "TEMP2": 22, "PRES": 20, "PRES1": 20,
+         "PRES2": 20, "P_OUT": 20, "DP_STAGE": 20, "DUTY": 13}
 
 
-def _block_param_convert(value, param, unit):
-    """Simulate the fixed set_param conversion path."""
-    if unit is None:
-        return value
-    known = _BLOCK_PARAM_UNITS.get(param)
-    if known:
-        return convert_by_name(value, unit, known)
-    node = MockNode(param, "")
-    return convert_value(value, unit, node)
+def _block_param_write(param, value, unit):
+    node = MockNode(param, row=_ROWS.get(param))
+    write_value(node, value, unit, base_internal=_BLOCK_PARAM_UNITS.get(param))
+    return node
 
 
-def test_block_duty_kW():
-    result = _block_param_convert(-500, "DUTY", "kW")
-    assert _approx(result, -500000.0)
+def test_block_temp_C_native_col():
+    node = _block_param_write("TEMP", 110, "C")
+    assert node.svau_calls == [(110, 4)]
 
-def test_block_duty_MW():
-    result = _block_param_convert(2.5, "DUTY", "MW")
-    assert _approx(result, 2500000.0)
 
-def test_block_temp_C():
-    result = _block_param_convert(110, "TEMP", "C")
-    assert _approx(result, 383.15)
+def test_block_temp_F_native_col():
+    node = _block_param_write("TEMP", 212, "F")
+    assert node.svau_calls == [(212, 2)]
 
-def test_block_temp_F():
-    result = _block_param_convert(212, "TEMP", "F")
-    assert _approx(result, 373.15)
 
-def test_block_pres_bar():
-    result = _block_param_convert(8, "PRES", "bar")
-    assert _approx(result, 800000.0)
+def test_block_pres_bar_native_col():
+    node = _block_param_write("PRES", 8, "bar")
+    assert node.svau_calls == [(8, 5)]
 
-def test_block_pres_atm():
-    result = _block_param_convert(1, "PRES", "atm")
-    assert _approx(result, 101325.0)
 
-def test_block_pres1_bar():
-    result = _block_param_convert(1.2, "PRES1", "bar")
-    assert _approx(result, 120000.0)
+def test_block_duty_kW_native_col():
+    node = _block_param_write("DUTY", -500, "kW")
+    assert node.svau_calls == [(-500, 13)]
 
-def test_block_no_unit_passthrough():
-    result = _block_param_convert(0.75, "SEFF", None)
-    assert result == 0.75
 
-def test_block_unknown_param_empty_unitstring():
-    result = _block_param_convert(42, "UNKNOWN_PARAM", "bar")
-    assert result == 42
+def test_block_no_unit_writes_si_col():
+    node = _block_param_write("TEMP", 298.15, None)
+    assert node.svau_calls == [(298.15, 1)]
 
-def test_block_param_unit_set_complete():
-    for p in ["TEMP", "PRES", "DUTY"]:
+
+def test_block_unknown_unit_python_fallback():
+    # "hp" has no native column -> python table with the known base "W"
+    node = _block_param_write("DUTY", 10, "hp")
+    assert len(node.svau_calls) == 1
+    v, col = node.svau_calls[0]
+    assert col == 1 and _approx(v, 7457.0)
+    assert node.set_calls == []
+
+
+def test_block_param_map_complete():
+    for p in ["TEMP", "TEMP1", "TEMP2", "PRES", "PRES1", "PRES2",
+              "P_OUT", "DUTY", "DP_STAGE"]:
         assert p in _BLOCK_PARAM_UNITS
 
-def test_block_param_all_convert_correctly():
-    cases = [
-        ("H1", "DUTY", -500, "kW", -500000.0),
-        ("H1", "PRES", 5, "bar", 500000.0),
-        ("F1", "TEMP", 110, "C", 383.15),
-        ("F1", "PRES", 1.5, "bar", 150000.0),
-        ("C1", "PRES", 8, "bar", 800000.0),
-    ]
-    for block, param, val, unit, expected in cases:
-        result = _block_param_convert(val, param, unit)
-        assert _approx(result, expected), \
-            f"{block}.{param} {val} {unit} -> {result}, expected {expected}"
+
+# == Bug 2: fraction compositions stay unit-free (raw write) ==
+# The guard now lives in the bridge (batch_is_frac): components get
+# write_value(node, val, None) while total_flow keeps the user unit.
+# Python-side: fraction writes with unit=None go through the SI column
+# on a row'd node and fall back to SetValue on dimensionless nodes.
+
+def test_frac_component_raw_write_with_row():
+    node = MockNode("CH3OH", row=11)
+    write_value(node, 0.40, None, base_internal="KMOL/SEC")
+    assert node.svau_calls == [(0.40, 1)]
 
 
-# == Bug 2: set_stream_composition_batch fractions ==
-
-def _composition_batch_logic(components, basis, total_flow, unit):
-    clear_unit_cache()
-    bn = basis.upper().replace("-", "").replace("_", "")
-    is_frac = "FRAC" in bn.upper()
-
-    if unit is None:
-        return components, total_flow
-
-    if not is_frac:
-        converted = {}
-        for comp, val in components.items():
-            node = MockNode("FLOW", "KMOL/SEC")
-            converted[comp] = convert_value(val, unit, node)
-        components = converted
-
-    if total_flow is not None:
-        if bn.startswith("MASS"):
-            node = MockNode("TOTAL", "KG/SEC")
-        else:
-            node = MockNode("TOTAL", "KMOL/SEC")
-        total_flow = convert_value(total_flow, unit, node)
-
-    return components, total_flow
+def test_frac_component_raw_write_no_row():
+    node = MockNode("CH3OH")  # dimensionless fraction node
+    write_value(node, 0.15, None)
+    assert node.set_calls == [(0, 0.15)]
 
 
-def test_frac_basis_components_not_converted():
-    comps = {"CH3OH": 0.40, "H2O": 0.45, "CO2": 0.15}
-    result_comps, result_total = _composition_batch_logic(
-        comps, "MOLE-FRAC", 200, "kmol/hr")
-    assert result_comps["CH3OH"] == 0.40
-    assert result_comps["H2O"] == 0.45
-    assert result_comps["CO2"] == 0.15
-    assert _approx(result_total, 200/3600)
-
-def test_frac_basis_massfrac_not_converted():
-    comps = {"CH3OH": 0.5, "H2O": 0.5}
-    result_comps, result_total = _composition_batch_logic(
-        comps, "MASS-FRAC", 3600, "kg/hr")
-    assert result_comps["CH3OH"] == 0.5
-    assert result_comps["H2O"] == 0.5
-    assert _approx(result_total, 1.0)
-
-def test_flow_basis_components_converted():
-    comps = {"CH3OH": 100, "H2O": 100}
-    result_comps, result_total = _composition_batch_logic(
-        comps, "MOLE-FLOW", 200, "kmol/hr")
-    assert _approx(result_comps["CH3OH"], 100/3600)
-    assert _approx(result_comps["H2O"], 100/3600)
-    assert _approx(result_total, 200/3600)
-
-def test_frac_basis_no_unit():
-    comps = {"CH3OH": 0.40, "CO2": 0.15}
-    result_comps, result_total = _composition_batch_logic(
-        comps, "MOLE-FRAC", 200, None)
-    assert result_comps == comps
-    assert result_total == 200
-
-def test_frac_basis_total_converted_but_fractions_not():
-    comps = {"CH3OH": 0.40, "H2O": 0.45, "CO2": 0.15}
-    result_comps, result_total = _composition_batch_logic(
-        comps, "MOLE-FRAC", 200, "kmol/hr")
-    for comp, val in comps.items():
-        assert result_comps[comp] == val, \
-            f"{comp}: {result_comps[comp]} != {val}"
-    assert _approx(result_total, 0.055556, tol=1e-5)
+def test_frac_total_flow_keeps_unit():
+    node = MockNode("TOTAL", row=11)
+    write_value(node, 200, "kmol/hr")
+    assert node.svau_calls == [(200, 3)]
 
 
+# == Bug 4: same-unit pairs pass through unchanged ==
 
-# == Round 2: set_value known-param fallback / add_side_duty unit / TEMP2 PRES2 ==
-
-def _set_value_logic(path, value, unit):
-    """Simulate the patched tool_set_value unit-conversion branch."""
-    if unit is None or isinstance(value, str):
-        return value
-    from aspen_mcp.tools.blocks import _BLOCK_PARAM_UNITS
-    from aspen_mcp.tools.units import convert_by_name, convert_value
-    param_name = path.rstrip("\\").split("\\")[-1]
-    known = _BLOCK_PARAM_UNITS.get(param_name)
-    if known:
-        return convert_by_name(value, unit, known)
-    node = MockNode(param_name, "")
-    return convert_value(value, unit, node)
+def test_convert_by_name_same_unit_passthrough():
+    assert convert_by_name(5.0, "F", "F") == 5.0
+    assert convert_by_name(1.0, "bar", "BAR") == 1.0
+    assert convert_by_name(2.0, "degC", "DEGC") == 2.0
+    assert convert_by_name(0.5, "kmol/hr", "KMOL/HR") == 0.5
 
 
-def test_set_value_block_temp_converts():
-    assert _approx(_set_value_logic("\\Data\\Blocks\\H1\\Input\\TEMP", 150, "C"), 423.15)
+def test_convert_by_name_normalizes():
+    assert _approx(convert_by_name(25, "C", "K"), 298.15)
+    assert _approx(convert_by_name(1, "bar", "N/SQM"), 100000.0)
 
-def test_set_value_block_duty_converts():
-    assert _approx(_set_value_logic("\\Data\\Blocks\\H1\\Input\\DUTY", -500, "kW"), -500000.0)
 
-def test_set_value_block_pres_bar_converts():
-    assert _approx(_set_value_logic("\\Data\\Blocks\\F1\\Input\\PRES", 1.5, "bar"), 150000.0)
-
-def test_set_value_stream_node_falls_back_to_convert_value():
-    # path tail is not a known block param -> convert_value reads node UnitString
-    from aspen_mcp.tools.blocks import _BLOCK_PARAM_UNITS
-    from aspen_mcp.tools.units import convert_value
-    param_name = "MIXED"
-    assert param_name not in _BLOCK_PARAM_UNITS
-    node = MockNode(param_name, "K")  # stream TEMP\MIXED node has UnitString
-    assert _approx(convert_value(40, "C", node), 313.15)
-
-def test_set_value_unknown_param_empty_unitstring_passthrough():
-    # documented limitation: unknown param + empty UnitString -> passthrough
-    assert _set_value_logic("\\Data\\Blocks\\H1\\Input\\SOMETHING", 42, "bar") == 42
-
-def test_block_param_map_has_temp2_pres2():
-    from aspen_mcp.tools.blocks import _BLOCK_PARAM_UNITS
-    assert _BLOCK_PARAM_UNITS.get("TEMP2") == "K"
-    assert _BLOCK_PARAM_UNITS.get("PRES2") == "N/SQM"
-    assert _approx(convert_by_name(80, "C", _BLOCK_PARAM_UNITS["TEMP2"]), 353.15)
-
-def test_side_duty_kW_converts():
-    assert _approx(convert_by_name(-500, "kW", "W"), -500000.0)
-
-def test_side_duty_no_unit_passthrough():
-    assert convert_by_name(-500000, None, "W") == -500000
-
-def test_side_duty_MW_converts():
-    assert _approx(convert_by_name(1.2, "MW", "W"), 1200000.0)
+def test_convert_by_name_unknown_raises():
+    try:
+        convert_by_name(5, "SNAIL/HR", "K")
+        assert False, "should have raised"
+    except ValueError as e:
+        assert "No unit conversion" in str(e)
 
 
 if __name__ == "__main__":
     import traceback
     tests = [(name, fn) for name, fn in sorted(globals().items())
-            if name.startswith("test_") and callable(fn)]
+             if name.startswith("test_") and callable(fn)]
     passed = 0
     failed = 0
     for name, fn in tests:
@@ -245,7 +170,4 @@ if __name__ == "__main__":
             failed += 1
     print(f"\n{'='*60}")
     print(f"Results: {passed} passed, {failed} failed, {len(tests)} total")
-    if failed:
-        sys.exit(1)
-    else:
-        print("ALL TESTS PASSED")
+    sys.exit(1 if failed else 0)

@@ -167,16 +167,8 @@ def tool_set_stream_param(stream_name: str, param: str, value: float, basis: str
             if err:
                 return f"Warning: could not set BASIS: {err}"
 
-        if unit is not None:
-            def _conv_sp():
-                tree = aspen._app.RootModel("")
-                from .units import convert_value
-                node = walk(tree, "Data", "Streams", stream_name, "Input", param)
-                if node is None:
-                    raise ValueError(f"stream '{stream_name}' param '{param}' not found for unit conversion")
-                return convert_value(value, unit, node)
-            value = aspen.call(_conv_sp)
-        ok = aspen.set_stream_param(stream_name, param, value)
+        # Unit conversion now happens in the bridge (native SetValueAndUnit).
+        ok = aspen.set_stream_param(stream_name, param, value, unit)
         if ok:
             msg = f"Stream '{stream_name}' {param} = {value}"
             # Show global unit set for context
@@ -211,16 +203,8 @@ def tool_set_stream_composition(stream_name: str, component: str, flow: float, u
     as Aspen truncates IDs > 8 chars internally (e.g. PROPYLENE -> PROPYLEN).
     """
     try:
-        if unit is not None:
-            def _conv_sc():
-                tree = aspen._app.RootModel("")
-                from .units import convert_value
-                node = walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", component)
-                if node is None:
-                    raise ValueError(f"component '{component}' not found in stream '{stream_name}' for unit conversion")
-                return convert_value(flow, unit, node)
-            flow = aspen.call(_conv_sc)
-        ok = aspen.set_stream_composition(stream_name, component, flow)
+        # Unit conversion now happens in the bridge (native SetValueAndUnit).
+        ok = aspen.set_stream_composition(stream_name, component, flow, unit)
         if ok:
             return f"Stream '{stream_name}' component '{component}' flow = {flow}"
         return f"Error: component '{component}' not found in stream '{stream_name}'"
@@ -269,35 +253,11 @@ def tool_set_stream_composition_batch(stream_name: str, components: dict[str, fl
         if is_frac and total_flow is None:
             return f"Error: {basis} requires total_flow parameter."
 
-        # Unit conversion: if unit given, convert flows to SI.
-        # When basis is a fraction (MOLE-FRAC / MASS-FRAC), component values
-        # are dimensionless and must NOT be unit-converted -- only total_flow
-        # is converted.  Converting fractions would divide them by 3600 etc.
-        if unit is not None:
-            from .units import convert_value
-            if not is_frac:
-                converted = {}
-                for comp, flow_val in components.items():
-                    def _conv_comp(cv=comp, fv=flow_val):
-                        tree = aspen._app.RootModel("")
-                        node = walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", cv)
-                        if node is None:
-                            raise ValueError(f"component '{cv}' not found in stream '{stream_name}'")
-                        return convert_value(fv, unit, node)
-                    converted[comp] = aspen.call(_conv_comp)
-                components = converted
-            if total_flow is not None:
-                def _conv_total(tv=total_flow):
-                    tree = aspen._app.RootModel("")
-                    node = walk(tree, "Data", "Streams", stream_name, "Input", "TOTAL", "MIXED")
-                    if node is None:
-                        raise ValueError(f"stream '{stream_name}' TOTAL node not found")
-                    return convert_value(tv, unit, node)
-                total_flow = aspen.call(_conv_total)
-
-        # Delegate to bridge (now properly implemented)
+        # Unit conversion now happens in the bridge (native SetValueAndUnit).
+        # Fraction bases: component values are dimensionless (written raw);
+        # only total_flow carries the user unit -- bridge decides per node.
         result = aspen.set_stream_composition_batch(
-            stream_name, components, basis, total_flow,
+            stream_name, components, basis, total_flow, unit,
         )
         return result
     except Exception as exc:

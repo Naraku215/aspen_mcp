@@ -94,9 +94,8 @@ _VALVE_ALIASES = {
 }
 
 # Known internal SI units for common block parameters.
-# Block Input nodes often have empty .UnitString (unlike stream Input nodes),
-# so convert_value() silently passes through without conversion.
-# For these params, use convert_by_name() with the known internal unit instead.
+# Passed to write_value as base_internal: used for the python-table fallback
+# when a user unit has no native (row, col) coordinate (e.g. HP).
 _BLOCK_PARAM_UNITS: dict[str, str] = {
     "TEMP": "K",
     "TEMP1": "K",
@@ -137,24 +136,19 @@ def tool_set_param(block_name: str, param: str, value: str | float,
                 if alias:
                     node = walk(tree, "Data", "Blocks", block_name, "Input", alias)
                     if node is not None:
-                        if unit is not None and not isinstance(value, str):
-                            from .units import convert_by_name, convert_value
-                            known = _BLOCK_PARAM_UNITS.get(alias)
-                            if known:
-                                value = convert_by_name(value, unit, known)
-                            else:
-                                value = convert_value(value, unit, node)
-                        node.SetValue(0, value)
+                        if isinstance(value, str):
+                            node.SetValue(0, value)
+                        else:
+                            from .units import write_value as _wv
+                            _wv(node, value, unit,
+                                base_internal=_BLOCK_PARAM_UNITS.get(alias))
                         return f"Set {block_name}.{alias} = {value} (via alias '{param}')"
                 return f"Could not set {block_name}.{param}"
-            if unit is not None and not isinstance(value, str):
-                from .units import convert_by_name, convert_value
-                known = _BLOCK_PARAM_UNITS.get(param)
-                if known:
-                    value = convert_by_name(value, unit, known)
-                else:
-                    value = convert_value(value, unit, node)
-            node.SetValue(0, value)
+            if isinstance(value, str):
+                node.SetValue(0, value)
+            else:
+                from .units import write_value as _wv
+                _wv(node, value, unit, base_internal=_BLOCK_PARAM_UNITS.get(param))
 
             # HEATER auto-mode-switch: when TEMP is set, ensure SPEC_OPT=CONST-TEMP
             if param == "TEMP":

@@ -249,40 +249,43 @@ class WindowsBridge(AspenBridge):
     def run_script(self, file_path):
         self.call(lambda: self._doc.RunScript(file_path))
 
-    def set_stream_param(self, stream_name, param, value, basis=None):
+    def set_stream_param(self, stream_name, param, value, unit=None, basis=None):
         def impl():
+            from ..tools.units import write_value
             node = _walk(self._doc.RootModel(""), "Data", "Streams", stream_name, "Input", param)
             if node is None:
                 return False
+            target = node
             try:
                 if node.Elements.Count > 0:
-                    node.Elements(0).SetValue(0, value)
-                else:
-                    node.SetValue(0, value)
+                    target = node.Elements(0)
+            except Exception:
+                pass
+            try:
+                write_value(target, value, unit)
                 return True
             except Exception:
-                try:
-                    node.SetValue(0, value)
-                    return True
-                except Exception:
-                    return False
+                return False
         return self.call(impl)
 
-    def set_stream_composition(self, stream_name, component, flow):
+    def set_stream_composition(self, stream_name, component, flow, unit=None):
         def impl():
+            from ..tools.units import write_value
             node = _walk(self._doc.RootModel(""), "Data", "Streams", stream_name,
                          "Input", "FLOW", "MIXED", component)
             if node is None:
                 return False
             try:
-                node.SetValue(0, flow)
+                write_value(node, flow, unit)
                 return True
             except Exception:
                 return False
         return self.call(impl)
 
-    def set_stream_composition_batch(self, stream_name, components, basis="MOLE-FLOW", total_flow=None):
+    def set_stream_composition_batch(self, stream_name, components, basis="MOLE-FLOW",
+                                     total_flow=None, unit=None):
         def impl():
+            from ..tools.units import write_value
             tree = self._doc.RootModel("")
             # Normalise basis
             bn = basis.upper().replace("-", "").replace("_", "")
@@ -308,16 +311,17 @@ class WindowsBridge(AspenBridge):
                 pass
             
             # Set total flow if provided
+            batch_is_frac = "FRAC" in basis_val
             if total_flow is not None:
                 total_node = _walk(tree, "Data", "Streams", stream_name, "Input", "TOTAL")
                 if total_node is not None:
                     try:
+                        target = total_node
                         if total_node.Elements.Count > 0:
-                            total_node.Elements(0).SetValue(0, total_flow)
-                        else:
-                            total_node.SetValue(0, total_flow)
+                            target = total_node.Elements(0)
+                        write_value(target, total_flow, unit)
                     except Exception:
-                        total_node.SetValue(0, total_flow)
+                        write_value(total_node, total_flow, unit)
             
             # Set each component
             results = []
@@ -327,7 +331,7 @@ class WindowsBridge(AspenBridge):
                     results.append(f"{comp}=NODE_NOT_FOUND")
                     continue
                 try:
-                    node.SetValue(0, val)
+                    write_value(node, val, None if batch_is_frac else unit)
                     results.append(f"{comp}={val}")
                 except Exception:
                     results.append(f"{comp}=FAILED")
@@ -341,13 +345,21 @@ class WindowsBridge(AspenBridge):
             return node.Value if node is not None else None
         return self.call(impl)
 
-    def set_value(self, value, *parts):
+    def get_si_value(self, *parts):
         def impl():
+            from ..tools.units import read_si
+            node = _walk(self._doc.RootModel(""), *parts)
+            return read_si(node)
+        return self.call(impl)
+
+    def set_value(self, value, *parts, unit=None):
+        def impl():
+            from ..tools.units import write_value
             node = _walk(self._doc.RootModel(""), *parts)
             if node is None:
                 return False
             try:
-                node.SetValue(0, value)
+                write_value(node, value, unit)
                 return True
             except Exception:
                 return False
@@ -376,7 +388,11 @@ class WindowsBridge(AspenBridge):
                             pass
             except Exception:
                 pass
-            node.SetValue(0, value)
+            if isinstance(value, str):
+                node.SetValue(0, value)
+            else:
+                from ..tools.units import write_value
+                write_value(node, value, unit)
             return "OK"
         return self.call(impl)
 

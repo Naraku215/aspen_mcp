@@ -268,8 +268,9 @@ def create_server() -> FastMCP:
           set_stream_param("S1", "VFRAC", 0.0)        — vapor fraction
 
         Values are always stored in internal SI (K, Pa, kmol/s) regardless of
-        the display Unit-Set. For engineering units pass the unit param, the
-        tool converts: set_stream_param("FEED","TEMP",25,unit="C"),
+        the display Unit-Set. For engineering units pass the unit param
+        (converted natively via SetValueAndUnit):
+        set_stream_param("FEED","TEMP",25,unit="C"),
         set_stream_param("FEED","PRES",1.5,unit="bar"),
         set_stream_param("FEED","TOTAL",100,unit="kmol/hr").
         Without unit the value is taken as SI.
@@ -607,12 +608,17 @@ def create_server() -> FastMCP:
     # ── generic path access ──────────────────────────────────────────────
 
     @mcp.tool()
-    def get_value(path: str) -> str:
+    def get_value(path: str, attribute: str | None = None) -> str:
         """Read a value by Aspen COM path.
 
         get_value("\\Data\\Streams\\FEED\\Output\\RES_TEMP")
+
+        attribute (optional view): "value" (default, display value following
+        the unit set), "si" (internal SI via ValueForUnit, stable across
+        unit sets), "attr" (AttributeValue(0) raw attribute),
+        or "unit" (UnitString label).
         """
-        return tool_get_value(path)
+        return tool_get_value(path, attribute)
 
     @mcp.tool()
     def set_value(path: str, value: str | float, unit: str | None = None) -> str:
