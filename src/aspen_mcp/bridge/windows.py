@@ -24,47 +24,62 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 3
-_TIMEOUT_SECONDS = 55
-_RETRY_DELAYS = [2.0, 3.0, 5.0]
+# 普通 COM 请求 ≤30 秒、RUN 生命周期 ≤60 秒；取消三次重试与自动重连重放。
+_TIMEOUT_SECONDS = 30
+_RUN_TIMEOUT_SECONDS = 60
 _STOP_SENTINEL = object()
-
-_CONNECTION_LOST_CODES = {
-    0x800706BA, 0x800706BE, 0x80010108, 0x800706BF, 0x80004005,
-}
-
-
-def _is_connection_error(exc):
-    try:
-        if hasattr(exc, "hresult"):
-            return exc.hresult in _CONNECTION_LOST_CODES
-        if hasattr(exc, "args") and len(exc.args) > 0:
-            if isinstance(exc.args[0], int):
-                return exc.args[0] in _CONNECTION_LOST_CODES
-    except Exception:
-        pass
-    return False
 
 
 # ── COM 套间线程 ──────────────────────────────────────────────────────
 
 
 class _ComJob:
-    def __init__(self, fn):
+    """一次 COM 派发；未开始且过期不执行，迟到结果保留、不重放。"""
+
+    def __init__(self, fn, deadline=None, clock=None):
         self.fn = fn
+        self.deadline = deadline
+        self._clock = clock or time.monotonic
+        self.started = False
+        self._late = None
+        self._late_error = None
         self.result_queue = queue.Queue(1)
 
     def run(self):
+        if self.deadline is not None and self._clock() >= self.deadline:
+            self.result_queue.put(("expired", {"status": "not_started"}))
+            return
+        self.started = True
         try:
             self.result_queue.put(("ok", self.fn()))
         except BaseException as exc:
             self.result_queue.put(("exc", exc))
 
     def wait(self, timeout):
-        status, value = self.result_queue.get(timeout=timeout)
+        try:
+            status, value = self.result_queue.get(timeout=timeout)
+        except queue.Empty:
+            if not self.started:
+                raise TimeoutError(
+                    f"COM job expired before start after {timeout}s (not_started)")
+            raise TimeoutError(f"COM timeout after {timeout}s (outcome_unknown)")
+        if status == "expired":
+            raise TimeoutError("COM job expired before start (not_started)")
         if status == "exc":
             raise value
         return value
+
+    def late_result(self):
+        """取回超时后才完成的结果；无迟到结果返回 None。"""
+        try:
+            status, value = self.result_queue.get_nowait()
+        except queue.Empty:
+            return self._late
+        if status == "ok":
+            self._late = value
+        elif status == "exc":
+            self._late_error = value
+        return self._late
 
 
 class _ComApartment:
@@ -101,7 +116,7 @@ class _ComApartment:
 
     def submit(self, fn, timeout=_TIMEOUT_SECONDS):
         self.start()
-        job = _ComJob(fn)
+        job = _ComJob(fn, deadline=time.monotonic() + timeout)
         self._job_queue.put(job)
         return job.wait(timeout)
 
@@ -129,39 +144,17 @@ class WindowsBridge(AspenBridge):
     def _disconnect(self):
         self._doc = None
 
-    def _is_dead(self):
+    def call(self, fn, timeout=None):
+        """单次派发到 COM 套间线程；超时或断连不重试、不重放。
+
+        超时后结果未知（outcome_unknown），不盲目重连或重发；
+        恢复方式由用户确认后另行操作。
+        """
         if self._doc is None:
-            return True
-        try:
-            _ = self._doc.Name
-            return False
-        except Exception:
-            return True
-
-    def _force_reconnect(self):
-        self._doc = None
-        self._connect()
-
-    def call(self, fn):
-        last_exc = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                if self._doc is None:
-                    _COM.submit(self._connect, _TIMEOUT_SECONDS)
-                return _COM.submit(fn, _TIMEOUT_SECONDS)
-            except queue.Empty:
-                last_exc = TimeoutError(f"COM timeout after {_TIMEOUT_SECONDS}s")
-                _COM.submit(self._force_reconnect, 10)
-            except Exception as exc:
-                last_exc = exc
-                is_dead = _COM.submit(self._is_dead, 10)
-                if _is_connection_error(exc) or is_dead:
-                    _COM.submit(self._force_reconnect, 10)
-                else:
-                    raise
-            if attempt < len(_RETRY_DELAYS):
-                time.sleep(_RETRY_DELAYS[attempt])
-        raise RuntimeError(f"COM call failed after {_MAX_RETRIES} attempts") from last_exc
+            _COM.submit(self._connect)
+        if timeout is None:
+            return _COM.submit(fn)
+        return _COM.submit(fn, timeout)
 
     @property
     def _app(self):
@@ -226,16 +219,17 @@ class WindowsBridge(AspenBridge):
         self.call(lambda: self._doc.Generate(file_path, 0))
 
     def run(self):
-        self.call(lambda: self._doc.Run2())
+        self.call(lambda: self._doc.Run2(), _RUN_TIMEOUT_SECONDS)
 
     def run_async(self):
-        self.call(lambda: self._doc.Engine.Run())
+        self.call(lambda: self._doc.Engine.Run(), _RUN_TIMEOUT_SECONDS)
 
     def reinit(self):
         self.call(lambda: self._doc.Engine.Reinit())
 
     def reinit_and_run(self):
-        self.call(lambda: (self._doc.Engine.Reinit(), self._doc.Run2()))
+        self.call(lambda: (self._doc.Engine.Reinit(), self._doc.Run2()),
+                  _RUN_TIMEOUT_SECONDS)
 
     def stop(self):
         self.call(lambda: self._doc.Engine.Stop())
@@ -249,95 +243,27 @@ class WindowsBridge(AspenBridge):
     def run_script(self, file_path):
         self.call(lambda: self._doc.RunScript(file_path))
 
-    def set_stream_param(self, stream_name, param, value, unit=None, basis=None):
-        def impl():
-            from ..tools.units import write_value
-            node = _walk(self._doc.RootModel(""), "Data", "Streams", stream_name, "Input", param)
-            if node is None:
-                return False
-            target = node
-            try:
-                if node.Elements.Count > 0:
-                    target = node.Elements(0)
-            except Exception:
-                pass
-            try:
-                write_value(target, value, unit)
-                return True
-            except Exception:
-                return False
-        return self.call(impl)
+    def set_stream_param(self, stream_name: str, param: str, value: str | float,
+                         *legacy: str, basis: str | None = None, unit: str | None = None,
+                         total_basis: str | None = None) -> dict:
+        from ..stream_contract import _stream_param
+        return _stream_param(self, stream_name, param, value, legacy=legacy,
+                             basis=basis, unit=unit, total_basis=total_basis)
 
-    def set_stream_composition(self, stream_name, component, flow, unit=None):
-        def impl():
-            from ..tools.units import write_value
-            node = _walk(self._doc.RootModel(""), "Data", "Streams", stream_name,
-                         "Input", "FLOW", "MIXED", component)
-            if node is None:
-                return False
-            try:
-                write_value(node, flow, unit)
-                return True
-            except Exception:
-                return False
-        return self.call(impl)
+    def set_stream_composition(self, stream_name: str, component: str, flow: str | float,
+                               *legacy: str, unit: str | None = None, basis: str | None = None,
+                               total_basis: str | None = None) -> dict:
+        from ..stream_contract import _stream_component
+        return _stream_component(self, stream_name, component, flow, legacy=legacy,
+                                 unit=unit, basis=basis, total_basis=total_basis)
 
-    def set_stream_composition_batch(self, stream_name, components, basis="MOLE-FLOW",
-                                     total_flow=None, unit=None):
-        def impl():
-            from ..tools.units import write_value
-            tree = self._doc.RootModel("")
-            # Normalise basis
-            bn = basis.upper().replace("-", "").replace("_", "")
-            basis_map = {"MOLEFLOW": "MOLE-FLOW", "MOLE": "MOLE-FLOW",
-                         "MASSFLOW": "MASS-FLOW", "MASS": "MASS-FLOW",
-                         "MOLEFRAC": "MOLE-FRAC", "MOLEFRACTION": "MOLE-FRAC",
-                         "MASSFRAC": "MASS-FRAC", "MASSFRACTION": "MASS-FRAC"}
-            basis_val = basis_map.get(bn, "")
-            if not basis_val:
-                return f"Invalid basis: {basis}"
-            
-            # Set BASIS attribute on FLOW/MIXED node
-            flow_node = _walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED")
-            if flow_node is None:
-                return f"Flow node not found for stream '{stream_name}'"
-            try:
-                flow_node._oleobj_.Invoke(
-                    flow_node._oleobj_.GetIDsOfNames("AttributeValue"), 0,
-                    pythoncom.DISPATCH_PROPERTYPUT, 0, 13, False, basis_val,
-                )
-            except Exception as e:
-                # If AttributeValue fails, try direct element add
-                pass
-            
-            # Set total flow if provided
-            batch_is_frac = "FRAC" in basis_val
-            if total_flow is not None:
-                total_node = _walk(tree, "Data", "Streams", stream_name, "Input", "TOTAL")
-                if total_node is not None:
-                    try:
-                        target = total_node
-                        if total_node.Elements.Count > 0:
-                            target = total_node.Elements(0)
-                        write_value(target, total_flow, unit)
-                    except Exception:
-                        write_value(total_node, total_flow, unit)
-            
-            # Set each component
-            results = []
-            for comp, val in components.items():
-                node = _walk(tree, "Data", "Streams", stream_name, "Input", "FLOW", "MIXED", comp)
-                if node is None:
-                    results.append(f"{comp}=NODE_NOT_FOUND")
-                    continue
-                try:
-                    write_value(node, val, None if batch_is_frac else unit)
-                    results.append(f"{comp}={val}")
-                except Exception:
-                    results.append(f"{comp}=FAILED")
-            
-            return f"Stream '{stream_name}' ({basis_val}): {', '.join(results)}"
-        return self.call(impl)
+    def set_stream_composition_batch(self, stream_name: str, components: dict,
+                                     basis: str = "MOLE-FLOW", total_flow: float | None = None,
+                                     unit: str | None = None, *, total_basis: str | None = None,
+                                     total_unit: str | None = None) -> dict:
+        from ..stream_contract import _stream_update
+        return _stream_update(self, stream_name, components, basis=basis, total_flow=total_flow,
+                              unit=unit, total_basis=total_basis, total_unit=total_unit)
 
     def get_value(self, *parts):
         def impl():
@@ -352,17 +278,18 @@ class WindowsBridge(AspenBridge):
             return read_si(node)
         return self.call(impl)
 
-    def set_value(self, value, *parts, unit=None):
+    def set_value(self, value: Any, *parts: str, unit: str | None = None) -> bool:
+        from ..tools.units import guard_stream_path, unsupported_report, write_path_value
+        path = "\\" + "\\".join(parts)
+        guard = guard_stream_path(path)
+        if guard is not None:
+            self._last_write_result = unsupported_report(path, guard)
+            return False
+
         def impl():
-            from ..tools.units import write_value
-            node = _walk(self._doc.RootModel(""), *parts)
-            if node is None:
-                return False
-            try:
-                write_value(node, value, unit)
-                return True
-            except Exception:
-                return False
+            report = write_path_value(self._doc.RootModel(""), path, value, unit=unit)
+            self._last_write_result = report
+            return report["ok"]
         return self.call(impl)
 
     def get_path_value(self, path):
@@ -371,32 +298,25 @@ class WindowsBridge(AspenBridge):
             return node.Value if node is not None else None
         return self.call(impl)
 
-    def set_path_value(self, path, value, unit=None):
+    def set_path_value(self, path: str, value: Any, unit: str | None = None) -> str:
+        from ..tools.units import guard_stream_path, unsupported_report, write_path_value, format_write_result
+        guard = guard_stream_path(path)
+        if guard is not None:
+            self._last_write_result = unsupported_report(path, guard)
+            return format_write_result(self._last_write_result)
+
         def impl():
-            node = self._doc.RootModel("").FindNode(path)
-            if node is None:
-                return f"Node not found: {path}"
-            try:
-                if node.Elements.Count > 0 and isinstance(value, str):
-                    for i in range(node.Elements.Count):
-                        try:
-                            child = node.Elements(i)
-                            if child.Name.upper() == value.upper():
-                                child.SetValue(0, value)
-                                return "OK"
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            if isinstance(value, str):
-                node.SetValue(0, value)
-            else:
-                from ..tools.units import write_value
-                write_value(node, value, unit)
-            return "OK"
+            report = write_path_value(self._doc.RootModel(""), path, value, unit=unit)
+            self._last_write_result = report
+            return format_write_result(report)
         return self.call(impl)
 
     def set_node_attribute(self, path, attribute, value):
+        from ..tools.units import guard_stream_path
+        guard = guard_stream_path(path)
+        if guard is not None:
+            return "Error: " + guard
+
         def impl():
             node = self._doc.RootModel("").FindNode(path)
             if node is None:

@@ -106,11 +106,17 @@ from .tools.utilities import (
     tool_get_utility,
     tool_remove_utility,
 )
+from .tools.configuration import (
+    tool_configure_model,
+    tool_inspect_configuration,
+)
 
 from .tools.paths import (
     tool_get_value,
     tool_set_value,
 )
+
+from .tool_audit import get_audit_log
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -122,7 +128,26 @@ logger = logging.getLogger("aspen_mcp")
 # COM initialization handled by bridge/windows.py at import time.
 
 
+def _apply_tool_audit() -> None:
+    """注册前的统一 wrapper：包装所有导入的 tool_* 入口，保留函数签名/schema。
+
+    在 FastMCP 注册之前就地替换本模块命名空间中的入口绑定，注册闭包内的
+    调用会解析到包装后的函数；不假定 FastMCP 中间件存在。幂等。
+    """
+    audit = get_audit_log()
+    namespace = globals()
+    for name, fn in list(namespace.items()):
+        if not name.startswith("tool_") or not callable(fn):
+            continue
+        if getattr(fn, "__audit_wrapped__", False):
+            continue
+        wrapper = audit.wrap_tool(fn, name=name[len("tool_"):])
+        wrapper.__audit_wrapped__ = True
+        namespace[name] = wrapper
+
+
 def create_server() -> FastMCP:
+    _apply_tool_audit()
     mcp = FastMCP("Aspen Plus MCP")
 
     # ── simulation ───────────────────────────────────────────────────────
@@ -748,13 +773,19 @@ def create_server() -> FastMCP:
         return tool_validate_block(block_name)
 
     @mcp.tool()
-    def fill_trivial_params(random_string: str | None = None) -> str:
-        """Fill harmless active-but-unset params with safe defaults.
+    def fill_trivial_params(random_string: str | None = None,
+                            objects: list[str] | None = None,
+                            params: list[str] | None = None,
+                            dry_run: bool = True) -> str:
+        """Preview harmless active-but-unset params; explicit write needs scope.
 
+        Default dry_run=True writes nothing. Pass objects and params lists
+        plus dry_run=False for a scoped explicit write (safe list only).
         Call BEFORE find_incomplete_inputs() to reduce noise from
         COM infrastructure / UI artifacts / estimation placeholders.
         """
-        return tool_fill_trivial_params(random_string)
+        return tool_fill_trivial_params(random_string, objects=objects,
+                                        params=params, dry_run=dry_run)
 
     @mcp.tool()
     def add_table_row(path: str, label: str | None = None, col: int = 0) -> str:
@@ -888,6 +919,27 @@ def create_server() -> FastMCP:
         utilities: [{"name": "CW", "type": "WATER", "block": "H1", "params": {...}}, ...]
         """
         return tool_batch_add_utilities(utilities)
+
+    # -- controlled batch configuration -------------------------------------------
+
+    @mcp.tool()
+    def configure_model(manifest: str | dict) -> dict:
+        """Apply a batch configuration manifest under the active task lineage.
+
+        manifest: JSON text or dict with operations (feed/block). Static checks
+        reject the whole batch with zero writes; runtime failures stop at the
+        affected object/dependency scope and receipts report per-op status.
+        """
+        return tool_configure_model(manifest)
+
+    @mcp.tool()
+    def inspect_configuration(manifest: str | dict) -> dict:
+        """Read-only preview of a manifest against current values and receipts.
+
+        Returns per-op decisions (would_apply/reuse/manual_divergence/unknown/
+        different_request); writes nothing and appends no ledger events.
+        """
+        return tool_inspect_configuration(manifest)
 
     logger.info("All tools registered")
     return mcp

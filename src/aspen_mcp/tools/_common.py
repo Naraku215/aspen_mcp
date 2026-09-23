@@ -8,6 +8,23 @@ from __future__ import annotations
 from typing import Any
 
 
+def normalize_path(path: str) -> str:
+    """统一 / 与反斜杠分隔符、去首尾分隔符并折叠重复分隔符；不改对象名。
+
+    非字符串输入属格式错误，抛 ValueError。
+    """
+    if not isinstance(path, str):
+        raise ValueError("path 必须是字符串（格式错误）")
+    parts = [p for p in path.replace("/", "\\").split("\\") if p]
+    return "\\".join(parts)
+
+
+def split_path(path: str) -> list[str]:
+    """规范化后切分为路径段；空路径（根）返回空列表。"""
+    normalized = normalize_path(path)
+    return normalized.split("\\") if normalized else []
+
+
 def walk(root: Any, *parts: str) -> Any | None:
     """Navigate an IHNode tree by path segments.
 

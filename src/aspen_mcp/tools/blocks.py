@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..com_bridge import aspen
-from ._common import walk, ensure_parent
+from ._common import walk, ensure_parent, normalize_path, split_path
 
 
 def _read_block_table_on_com(node: Any) -> dict[str, Any]:
@@ -128,27 +128,18 @@ def tool_set_param(block_name: str, param: str, value: str | float,
     """
     try:
         def impl():
-            nonlocal value
+            from .units import write_node_value, format_write_result
             tree = aspen._app.RootModel("")
+            resolved_param = param
             node = walk(tree, "Data", "Blocks", block_name, "Input", param)
             if node is None:
-                alias = _VALVE_ALIASES.get(param)
-                if alias:
-                    node = walk(tree, "Data", "Blocks", block_name, "Input", alias)
-                    if node is not None:
-                        if isinstance(value, str):
-                            node.SetValue(0, value)
-                        else:
-                            from .units import write_value as _wv
-                            _wv(node, value, unit,
-                                base_internal=_BLOCK_PARAM_UNITS.get(alias))
-                        return f"Set {block_name}.{alias} = {value} (via alias '{param}')"
-                return f"Could not set {block_name}.{param}"
-            if isinstance(value, str):
-                node.SetValue(0, value)
-            else:
-                from .units import write_value as _wv
-                _wv(node, value, unit, base_internal=_BLOCK_PARAM_UNITS.get(param))
+                resolved_param = _VALVE_ALIASES.get(param, param)
+                node = walk(tree, "Data", "Blocks", block_name, "Input", resolved_param)
+            report = write_node_value(node, value, user_unit=unit,
+                                      base_internal=_BLOCK_PARAM_UNITS.get(resolved_param))
+            report["target"] = f"{block_name}.{resolved_param}"
+            if not report["ok"]:
+                return format_write_result(report)
 
             # HEATER auto-mode-switch: when TEMP is set, ensure SPEC_OPT=CONST-TEMP
             if param == "TEMP":
@@ -163,8 +154,13 @@ def tool_set_param(block_name: str, param: str, value: str | float,
                             cur_mode = spec_opt.Value
                             if cur_mode is None or str(cur_mode).upper() in ("CONST-DUTY", ""):
                                 spec_opt.SetValue(0, "CONST-TEMP")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            report["mode_switch"] = {
+                                "status": "failed", "target": f"{block_name}.SPEC_OPT",
+                                "error": f"{type(exc).__name__}: {exc}",
+                                "note": "TEMP 已写入但模式未切换，结果可能仍按 CONST-DUTY 解释"}
+                            report["ok"] = False
+                            return format_write_result(report)
 
             # Show global unit set for context
             context = ""
@@ -175,7 +171,8 @@ def tool_set_param(block_name: str, param: str, value: str | float,
             except Exception:
                 pass
 
-            return f"Set {block_name}.{param} = {value}{context}"
+            report["context"] = context
+            return format_write_result(report)
         return aspen.call(impl)
     except Exception as exc:
         exc_str = str(exc)
@@ -317,16 +314,22 @@ def _node_info_on_com(node: Any, depth_limit: int = 2, _depth: int = 0) -> dict[
 def tool_explore(path: str) -> dict[str, Any]:
     """Explore any IHNode path (backslash-delimited, e.g. Data\\Properties)."""
     try:
+        parts = split_path(path)
+    except ValueError as exc:
+        return {"error": str(exc), "kind": "format_error"}
+    try:
         def impl():
             tree = aspen._app.RootModel("")
-            parts = path.replace("/", "\\").split("\\")
             node = walk(tree, *parts)
             if node is None:
-                return {"error": f"Path '{path}' not found"}
+                return {"error": f"Path '{path}' not found", "kind": "node_missing",
+                        "path_normalized": normalize_path(path)}
             return _node_info_on_com(node, depth_limit=2)
         return aspen.call(impl)
+    except TimeoutError as exc:
+        return {"error": str(exc), "kind": "timeout"}
     except Exception as exc:
-        return {"error": str(exc)}
+        return {"error": str(exc), "kind": "com_error"}
 
 
 def tool_block_status(name: str) -> dict:

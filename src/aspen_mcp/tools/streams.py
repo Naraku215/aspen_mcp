@@ -117,7 +117,9 @@ def tool_get_stream_composition_info(name: str) -> dict[str, Any]:
     """Return known stream composition metadata."""
     try:
         def impl():
-            result: dict[str, Any] = {"stream": name}
+            from ..stream_contract import capability_matrix
+            result: dict[str, Any] = {"stream": name, "capabilities": capability_matrix(),
+                                      "read_source": "Value(raw)", "basis_status": "unknown"}
             tree = aspen._app.RootModel("")
             out = walk(tree, "Data", "Streams", name, "Output")
             if out is None:
@@ -132,84 +134,29 @@ def tool_get_stream_composition_info(name: str) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-def tool_set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None, unit: str | None = None) -> str:
-    """Set a stream input parameter (TEMP, PRES, TOTAL, or component flow).
+def tool_set_stream_param(stream_name: str, param: str, value: str | float,
+                          basis: str | None = None, unit: str | None = None, *,
+                          total_basis: str | None = None) -> dict:
+    """流股单项更新；省略单位仅在已知量纲时解释为 SI。
 
-    Auto-handles MIXED sub-node writing. Response auto-reports unit
-    via .UnitString (e.g. [C], [bar], [kmol/hr]).
-
-    Args:
-        stream_name: Stream name (e.g. "S1", "FEED").
-        param: TEMP, PRES, TOTAL, VFRAC, or a component ID.
-        value: Numeric value. Unit is determined by current Unit-Set
-               (response auto-shows [unit] like [C] or [bar]).
-        basis: For component flow, e.g. MOLE-FLOW, MASS-FLOW,
-               MOLE-FRAC, MASS-FRAC. Required for component flow.
-
-    Note: Use set_param() for BLOCK parameters, NOT this tool.
-    Streams and blocks have separate parameter trees in Aspen COM.
+    组成写入必须具有独立验证的内部能力；返回写/读回及部分更新范围。
     """
     try:
-        if basis is not None:
-            basis_norm = basis.upper().replace("-", "").replace("_", "")
-            if basis_norm in ("MOLEFLOW", "MOLE"):
-                basis_val = "MOLE-FLOW"
-            elif basis_norm in ("MASSFLOW", "MASS"):
-                basis_val = "MASS-FLOW"
-            elif basis_norm in ("MOLEFRAC", "MOLE-FRACTION"):
-                basis_val = "MOLE-FRAC"
-            elif basis_norm in ("MASSFRAC", "MASS-FRACTION"):
-                basis_val = "MASS-FRAC"
-            else:
-                return f"Invalid basis '{basis}'. Valid: MOLE-FLOW, MASS-FLOW, MOLE-FRAC, MASS-FRAC"
-            flow_path = rf"\Data\Streams\{stream_name}\Input\FLOW\MIXED"
-            err = aspen.set_node_attribute(flow_path, 13, basis_val)
-            if err:
-                return f"Warning: could not set BASIS: {err}"
-
-        # Unit conversion now happens in the bridge (native SetValueAndUnit).
-        ok = aspen.set_stream_param(stream_name, param, value, unit)
-        if ok:
-            msg = f"Stream '{stream_name}' {param} = {value}"
-            # Show global unit set for context
-            try:
-                def read_unit_set():
-                    tree = aspen._app.RootModel("")
-                    us = walk(tree, "Data", "Setup", "Global", "Input", "GLOBDATASET")
-                    return str(us.Value) if us is not None and us.Value else ""
-                us_str = aspen.call(read_unit_set)
-                if us_str:
-                    msg += f" (unit set: {us_str})"
-            except Exception:
-                pass
-            if basis:
-                msg += f" (BASIS={basis_val})"
-            return msg
-        return f"Error: stream '{stream_name}' or param '{param}' not found"
+        return aspen.set_stream_param(stream_name=stream_name, param=param, value=value,
+                                      basis=basis, unit=unit, total_basis=total_basis)
     except Exception as exc:
-        return f"Error: {exc}"
+        return {"ok": False, "status": "failed", "error": str(exc), "scope": "partial"}
 
 
-def tool_set_stream_composition(stream_name: str, component: str, flow: float, unit: str | None = None) -> str:
-    """Set a component's molar flow in a stream.
-
-    Args:
-        stream_name: Stream name.
-        component: Component label (use list_components() to confirm
-                   actual label, as IDs over 8 chars get truncated).
-        flow: Molar flow (unit depends on current Unit-Set, typically kmol/hr).
-
-    Note: Confirm the component label with list_components() first,
-    as Aspen truncates IDs > 8 chars internally (e.g. PROPYLENE -> PROPYLEN).
-    """
+def tool_set_stream_composition(stream_name: str, component: str, flow: str | float,
+                                unit: str | None = None, *, basis: str | None = None,
+                                total_basis: str | None = None) -> dict:
+    """单组分的显式部分更新；不补零、不改变其余组成的基准。"""
     try:
-        # Unit conversion now happens in the bridge (native SetValueAndUnit).
-        ok = aspen.set_stream_composition(stream_name, component, flow, unit)
-        if ok:
-            return f"Stream '{stream_name}' component '{component}' flow = {flow}"
-        return f"Error: component '{component}' not found in stream '{stream_name}'"
+        return aspen.set_stream_composition(stream_name=stream_name, component=component,
+                                            flow=flow, unit=unit, basis=basis, total_basis=total_basis)
     except Exception as exc:
-        return f"Error: {exc}"
+        return {"ok": False, "status": "failed", "error": str(exc), "scope": "partial"}
 
 
 def tool_add_stream(name: str) -> str:
@@ -229,39 +176,21 @@ def tool_add_stream(name: str) -> str:
         return f"Error: {exc}"
 
 
-def tool_set_stream_composition_batch(stream_name: str, components: dict[str, float],
-                                      basis: str = "MOLE-FLOW",
-                                      total_flow: float | None = None,
-                                      unit: str | None = None) -> str:
-    """Batch-set stream composition with BASIS control and optional total flow.
+def tool_set_stream_composition_batch(stream_name: str, components: dict[str, str | float],
+                                      basis: str = "MOLE-FLOW", total_flow: float | None = None,
+                                      unit: str | None = None, *, total_basis: str | None = None,
+                                      total_unit: str | None = None) -> dict:
+    """完整非负有限组成向量；组成基准与总量基准分别验证。
 
-    Args:
-        stream_name: Stream name (e.g. 'FEED').
-        components: {component_id: value} dict.
-        basis: MOLE-FLOW (default), MASS-FLOW, MOLE-FRAC, MASS-FRAC.
-        total_flow: Required when basis is a fraction (e.g. MOLE-FRAC).
+    fraction 闭合容差 1e-6，必须提供正总流量；flow 求和而不再乘总量。
+    旧 fraction 的 unit 仅指总量单位。所有生产组合仍为 unverified。
     """
     try:
-        # Normalise basis name
-        bn = basis.upper().replace("-", "").replace("_", "")
-        valid = {"MOLEFLOW": True, "MOLE": True, "MASSFLOW": True, "MASS": True,
-                 "MOLEFRAC": True, "MOLEFRACTION": True, "MASSFRAC": True, "MASSFRACTION": True}
-        if bn not in valid:
-            return f"Invalid basis '{basis}'. Valid: MOLE-FLOW, MASS-FLOW, MOLE-FRAC, MASS-FRAC"
-
-        is_frac = "FRAC" in bn.upper()
-        if is_frac and total_flow is None:
-            return f"Error: {basis} requires total_flow parameter."
-
-        # Unit conversion now happens in the bridge (native SetValueAndUnit).
-        # Fraction bases: component values are dimensionless (written raw);
-        # only total_flow carries the user unit -- bridge decides per node.
-        result = aspen.set_stream_composition_batch(
-            stream_name, components, basis, total_flow, unit,
-        )
-        return result
+        return aspen.set_stream_composition_batch(
+            stream_name=stream_name, components=components, basis=basis, total_flow=total_flow,
+            unit=unit, total_basis=total_basis, total_unit=total_unit)
     except Exception as exc:
-        return f"Error: {exc}"
+        return {"ok": False, "status": "failed", "error": str(exc), "scope": "complete"}
 
 
 def tool_remove_stream(name: str) -> str:

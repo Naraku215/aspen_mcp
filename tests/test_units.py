@@ -9,6 +9,7 @@ Run with:  venv\Scripts\python.exe -m pytest tests\test_units.py -v
 Or standalone:  venv\Scripts\python.exe tests\test_units.py
 """
 import sys, os
+import pytest
 
 # Ensure src on path when running standalone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -17,11 +18,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 # ── Mock COM node (native unit API surface) ───────────────────────────────
 class MockNode:
     """Simulates a COM IHNode with AttributeValue/SetValueAndUnit/ValueForUnit."""
-    def __init__(self, name="", row=None, value=None, unit_string=""):
+    def __init__(self, name="", row=None, value=None, unit_string="", col=1):
         self.Name = name
         self.UnitString = unit_string
         self.Value = value
         self._row = row
+        self._col = col
         self.svau_calls = []   # (value, col)
         self.set_calls = []    # (idx, value)
         self.vfu_calls = []    # (row, col)
@@ -31,6 +33,8 @@ class MockNode:
             if self._row is None:
                 raise ValueError("no row")
             return self._row
+        if attr == 3:
+            return self._col
         if attr == 81:
             return self.UnitString
         raise ValueError(f"attr {attr} not simulated")
@@ -251,20 +255,21 @@ def test_write_unknown_unit_raises():
                             base_internal="W"))
     assert "No unit conversion registered" in str(e)
 
-def test_write_no_row_falls_back_to_setvalue():
+def test_write_unknown_row_rejected():
     node = MockNode("VFRAC", row=None)
-    write_value(node, 0.5)
-    assert node.svau_calls == []
-    assert node.set_calls == [(0, 0.5)]
+    with pytest.raises(ValueError):
+        write_value(node, 0.5)
+    assert node.svau_calls == node.set_calls == []
 
-def test_write_svau_exception_falls_back_to_setvalue():
+def test_write_svau_exception_does_not_retry_raw():
     class _NoSvauNode(MockNode):
         def SetValueAndUnit(self, value, col):
             raise RuntimeError("SetValueAndUnit refused")
     node = _NoSvauNode("TEMP", row=22)
-    write_value(node, 300)
+    with pytest.raises(RuntimeError, match="SetValueAndUnit refused"):
+        write_value(node, 300)
     assert node.svau_calls == []
-    assert node.set_calls == [(0, 300)]
+    assert node.set_calls == []
 
 def test_write_none_node_raises():
     e = _raises_valueerror(lambda: write_value(None, 1))
@@ -281,16 +286,18 @@ def test_read_si_with_row():
     assert read_si(node) == 313.15
     assert node.vfu_calls == [(22, 1)]
 
-def test_read_si_no_row_falls_back_to_value():
+def test_read_si_unknown_row_rejected():
     node = MockNode("VFRAC", row=None, value=0.5)
-    assert read_si(node) == 0.5
+    with pytest.raises(ValueError):
+        read_si(node)
 
-def test_read_si_vfu_exception_falls_back():
+def test_read_si_vfu_exception_never_returns_raw():
     class _NoVfuNode(MockNode):
         def ValueForUnit(self, row, col):
             raise RuntimeError("ValueForUnit refused")
     node = _NoVfuNode("TEMP", row=22, value=313.15)
-    assert read_si(node) == 313.15
+    with pytest.raises(ValueError, match="ValueForUnit refused"):
+        read_si(node)
 
 def test_read_si_none_node():
     assert read_si(None) is None
@@ -359,24 +366,113 @@ def test_conversion_table_has_all_categories():
     assert len(energy) >= 6, f"energy: only {len(energy)} entries"
 
 
+@pytest.mark.parametrize("value", [" 2.5e1 ", 25, 25.0])
+def test_numeric_representations(value):
+    node = MockNode("TEMP", row=22)
+    write_value(node, value, "C")
+    assert node.svau_calls == [(25.0, 4)]
+    assert convert_value(value, "C") == pytest.approx(298.15)
+
+
+@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"), "NaN", "-Inf", "1e999", "abc"])
+def test_invalid_numeric_values_never_write(value):
+    node = MockNode("TEMP", row=22)
+    with pytest.raises(ValueError):
+        write_value(node, value, "K")
+    with pytest.raises(ValueError):
+        convert_by_name(value, None, "K")
+    assert node.svau_calls == node.set_calls == []
+
+
+@pytest.mark.parametrize("row,col,unit,base", [
+    (22, 1, "bar", None), (20, 1, "C", None), (22, 1, "C", "W"),
+    (None, 1, "C", "K"), (999, 1, None, None), (True, 1, None, None),
+    (22.5, 1, None, None), (22, True, None, None), (22, -1, None, None),
+    (22, 1.5, None, None), (22, 999, None, None), (0, 0, "K", None),
+    (22, 1, "", None),
+])
+def test_dimension_and_coordinate_validation(row, col, unit, base):
+    node = MockNode(row=row, col=col)
+    with pytest.raises(ValueError):
+        write_value(node, 1, unit, base_internal=base)
+    assert node.svau_calls == node.set_calls == []
+
+
+def test_dimensionless_separate_contract():
+    node = MockNode("VFRAC", row=0, col=0, value=0.1)
+    write_value(node, " 5e-1 ")
+    assert node.set_calls == [(0, 0.5)]
+    assert read_si(node) == 0.5
+    assert node.vfu_calls == []
+
+
+def test_conversion_with_node_checks_dimension_for_shared_callers():
+    with pytest.raises(ValueError):
+        convert_value(1, "C", MockNode("PRES1", row=20))
+
+
+def test_conversion_overflow_rejected():
+    with pytest.raises(ValueError):
+        convert_by_name(1e308, "MW", "W")
+
+
+def test_read_diagnostics_keep_actual_source_and_error():
+    from aspen_mcp.tools.units import read_si_result
+    class Broken(MockNode):
+        def ValueForUnit(self, row, col):
+            raise RuntimeError("native read failed")
+    result = read_si_result(Broken(row=22, value=999))
+    assert result["value"] is None
+    assert result["read_source"] == "ValueForUnit(22,1)"
+    assert "native read failed" in result["error"]
+    assert result["ok"] is False
+
+
 # ── Standalone runner ───────────────────────────────────────────────────────
+def _param_combinations(fn):
+    """展开 pytest.mark.parametrize（含多层叠加）；普通测试返回 [{}]。"""
+    markers = getattr(fn, "pytestmark", [])
+    if not isinstance(markers, list):
+        markers = [markers]
+    combos = [{}]
+    for mark in markers:
+        if getattr(mark, "name", "") != "parametrize":
+            continue
+        argnames, argvalues = mark.args[0], mark.args[1]
+        names = ([n.strip() for n in argnames.split(",")]
+                 if isinstance(argnames, str) else list(argnames))
+        expanded = []
+        for base in combos:
+            for values in argvalues:
+                values = values if isinstance(values, tuple) else (values,)
+                merged = dict(base)
+                merged.update(dict(zip(names, values)))
+                expanded.append(merged)
+        combos = expanded
+    return combos
+
+
 if __name__ == "__main__":
     import traceback
     tests = [(name, fn) for name, fn in sorted(globals().items())
             if name.startswith("test_") and callable(fn)]
     passed = 0
     failed = 0
+    total = 0
     for name, fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-            passed += 1
-        except Exception:
-            print(f"  FAIL  {name}")
-            traceback.print_exc()
-            failed += 1
+        for kwargs in _param_combinations(fn):
+            total += 1
+            label = name if not kwargs else f"{name}[{','.join(map(str, kwargs.values()))}]"
+            try:
+                fn(**kwargs)
+                print(f"  PASS  {label}")
+                passed += 1
+            except Exception:
+                print(f"  FAIL  {label}")
+                traceback.print_exc()
+                failed += 1
     print(f"\n{'='*60}")
-    print(f"Results: {passed} passed, {failed} failed, {len(tests)} total")
+    print(f"Results: {passed} passed, {failed} failed, {total} total")
     if failed:
         sys.exit(1)
     else:

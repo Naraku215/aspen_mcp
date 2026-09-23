@@ -78,8 +78,8 @@ class StubBridge(AspenBridge):
 
     # ── AspenBridge 实现 ──────────────────────────────────────────────
 
-    def call(self, fn: Callable) -> Any:
-        """Stub 模式：同步执行，无需 COM 线程。"""
+    def call(self, fn: Callable, timeout: float | None = None) -> Any:
+        """Stub 模式：同步执行，无需 COM 线程；timeout 仅为签名兼容。"""
         return fn()
 
     @property
@@ -150,39 +150,27 @@ class StubBridge(AspenBridge):
     def run_script(self, file_path: str):
         self._record("run_script", file_path)
 
-    def set_stream_param(self, stream_name: str, param: str, value: float,
-                         basis: str | None = None) -> bool:
-        node = self._tree.FindNode(f"\\Data\\Streams\\{stream_name}\\Input\\{param}")
-        if node is None:
-            node = self._tree.Elements("Data").Elements("Streams").Elements(stream_name) \
-                         .Elements("Input").Elements(param)
-        if node.Elements_Count > 0:
-            node.Elements(0).Value = value
-        else:
-            node.Value = value
-        self._record("set_stream_param", stream_name, param, value, basis)
-        return True
+    def set_stream_param(self, stream_name: str, param: str, value: str | float,
+                         *legacy: str, basis: str | None = None, unit: str | None = None,
+                         total_basis: str | None = None) -> dict:
+        from ..stream_contract import _stream_param
+        return _stream_param(self, stream_name, param, value, legacy=legacy,
+                             basis=basis, unit=unit, total_basis=total_basis)
 
-    def set_stream_composition(self, stream_name: str, component: str,
-                               flow: float) -> bool:
-        path = f"\\Data\\Streams\\{stream_name}\\Input\\FLOW\\MIXED\\{component}"
-        node = self._tree.FindNode(path)
-        if node is None:
-            node = (self._tree.Elements("Data").Elements("Streams")
-                    .Elements(stream_name).Elements("Input")
-                    .Elements("FLOW").Elements("MIXED").Elements(component))
-        node.Value = flow
-        self._record("set_stream_composition", stream_name, component, flow)
-        return True
+    def set_stream_composition(self, stream_name: str, component: str, flow: str | float,
+                               *legacy: str, unit: str | None = None, basis: str | None = None,
+                               total_basis: str | None = None) -> dict:
+        from ..stream_contract import _stream_component
+        return _stream_component(self, stream_name, component, flow, legacy=legacy,
+                                 unit=unit, basis=basis, total_basis=total_basis)
 
     def set_stream_composition_batch(self, stream_name: str, components: dict,
-                                     basis: str = "MOLE-FLOW",
-                                     total_flow: float | None = None) -> str:
-        for comp, flow in components.items():
-            self.set_stream_composition(stream_name, comp, flow)
-        if total_flow is not None:
-            self.set_stream_param(stream_name, "TOTAL", total_flow)
-        return "OK"
+                                     basis: str = "MOLE-FLOW", total_flow: float | None = None,
+                                     unit: str | None = None, *, total_basis: str | None = None,
+                                     total_unit: str | None = None) -> dict:
+        from ..stream_contract import _stream_update
+        return _stream_update(self, stream_name, components, basis=basis, total_flow=total_flow,
+                              unit=unit, total_basis=total_basis, total_unit=total_unit)
 
     def get_value(self, *parts: str) -> Any:
         node = self._tree
@@ -193,29 +181,30 @@ class StubBridge(AspenBridge):
                 return None
         return node.Value
 
-    def set_value(self, value: Any, *parts: str) -> bool:
-        node = self._tree
-        for p in parts[:-1]:
-            if p not in node._children:
-                node.Elements(p)
-            node = node._children[p]
-        last = parts[-1]
-        if last in node._children:
-            node._children[last].Value = value
-        else:
-            node.Elements(last).Value = value
-        return True
+    def set_value(self, value: Any, *parts: str, unit: str | None = None) -> bool:
+        from ..tools.units import guard_stream_path, unsupported_report, write_path_value
+        path = "\\" + "\\".join(parts)
+        guard = guard_stream_path(path)
+        if guard is not None:
+            self._last_write_result = unsupported_report(path, guard)
+            return False
+        report = write_path_value(self._tree, path, value, unit=unit)
+        self._last_write_result = report
+        return report["ok"]
 
     def get_path_value(self, path: str) -> Any:
         node = self._tree.FindNode(path)
         return node.Value if node else None
 
-    def set_path_value(self, path: str, value: Any, unit=None) -> str:
-        node = self._tree.FindNode(path)
-        if node is None:
-            return f"Node not found: {path}"
-        node.Value = value
-        return "OK"
+    def set_path_value(self, path: str, value: Any, unit: str | None = None) -> str:
+        from ..tools.units import guard_stream_path, unsupported_report, write_path_value, format_write_result
+        guard = guard_stream_path(path)
+        if guard is not None:
+            self._last_write_result = unsupported_report(path, guard)
+            return format_write_result(self._last_write_result)
+        report = write_path_value(self._tree, path, value, unit=unit)
+        self._last_write_result = report
+        return format_write_result(report)
 
     def get_node(self, *parts: str) -> Any:
         node = self._tree
@@ -233,6 +222,10 @@ class StubBridge(AspenBridge):
         return self._tree
 
     def set_node_attribute(self, path: str, attribute: Any, value: Any) -> str:
+        from ..tools.units import guard_stream_path
+        guard = guard_stream_path(path)
+        if guard is not None:
+            return "Error: " + guard
         self._record("set_node_attribute", path, attribute, value)
         return "OK"
 

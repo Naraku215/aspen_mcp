@@ -104,6 +104,43 @@ def _read_mode_value(tree, block_name, mode_param):
     return None
 
 
+def _mode_check(tree, block_name: str) -> tuple[str, str]:
+    '''Verify required params for the current operating mode.
+
+    Returns (status, detail) with status in {"pass", "fail", "unknown"}.
+    Required node missing, unknown mode, or unreadable required attribute
+    must never promote to pass (fail/unknown 不晋级).
+    '''
+    blk_type = _get_block_type(tree, block_name)
+    if not blk_type:
+        return "unknown", "block type unreadable"
+    config = _BLOCK_MODES.get(blk_type)
+    if config is None:
+        return "unknown", f"no mode map for block type '{blk_type}'"
+    mode = _read_mode_value(tree, block_name, config["mode_param"])
+    if not mode:
+        mode = config.get("default_mode")
+    mode_map = config.get("mode_map", {})
+    if not mode or mode not in mode_map:
+        return "unknown", f"unrecognized {config['mode_param']}={mode!r}"
+    missing = []
+    for pname in mode_map[mode]:
+        node = walk(tree, "Data", "Blocks", block_name, "Input", pname)
+        if node is None:
+            missing.append(pname)
+            continue
+        try:
+            value = node.Value
+        except Exception:
+            return "unknown", f"required param '{pname}' unreadable"
+        if value is None or (isinstance(value, str)
+                             and (value == "" or value.startswith("#") or "rror" in value)):
+            missing.append(pname)
+    if missing:
+        return "fail", f"{config['mode_param']}={mode}: missing {', '.join(missing)}"
+    return "pass", f"{config['mode_param']}={mode}: required {', '.join(mode_map[mode])}"
+
+
 def _categorize_block_params(tree, block_name):
     '''Categorize unset-but-active params.
 
@@ -571,6 +608,11 @@ def tool_validate_block(block_name: str) -> str:
                 else:
                     lines.append("  (all active params have values)")
 
+                # 模式核验：fail/unknown 不晋级
+                status, detail = _mode_check(tree, block_name)
+                tag = {"pass": "PASS", "fail": "FAIL", "unknown": "UNKNOWN"}[status]
+                lines.append(f"Mode check: {tag} ({detail})")
+
             return "\n".join(lines)
         return aspen.call(impl)
     except Exception as exc:
@@ -578,75 +620,112 @@ def tool_validate_block(block_name: str) -> str:
 
 
 
+# 压缩/压降类块的 Input PRES 是出口侧规格，与进口流股压力不构成可比口径；
+# 其余块也仅在两个值单位标签一致时比较（SI 口径核验留待原生验证）。
+_PRESSURE_SPEC_TYPES = frozenset({"COMPR", "MCOMPR", "PUMP", "COMP"})
+
+
 def tool_simulation_warnings(random_string: str | None = None) -> list[str]:
-    """Scan for common config issues and return warnings."""
+    """Scan for common config issues and return warnings.
+
+    Connection index is built from block Ports first (limited enumeration);
+    stream Output SOURCE/DESTINATION only supplements it. Interrupted
+    enumeration is reported as UNKNOWN, never as a clean "no warnings".
+    """
     try:
         def impl():
             tree = aspen._app.RootModel("")
             warnings: list[str] = []
+            connected: set[str] = set()
+            enumeration_interrupted = False
 
-            # 检查连接模块之间的压力不匹配
+            def _enumerate(container, limit):
+                """Yield child nodes; IndexError/None end cleanly, other errors flag UNKNOWN."""
+                nonlocal enumeration_interrupted
+                for idx in range(limit):
+                    try:
+                        child = container.Elements(idx)
+                    except IndexError:
+                        return
+                    except Exception:
+                        enumeration_interrupted = True
+                        return
+                    if child is None:
+                        return
+                    yield child
+
+            # 压力比较与连接索引共享一次遍历
             blks = walk(tree, "Data", "Blocks")
             if blks is not None:
-                for i in range(200):
-                    try:
-                        b = blks.Elements(i)
-                    except Exception:
-                        break
-                    if b is None:
-                        break
+                for b in _enumerate(blks, 200):
                     bname = b.Name
-                    bin_pres = walk(tree, "Data", "Blocks", bname, "Input", "PRES")
-                    if bin_pres is None:
-                        bin_pres = walk(tree, "Data", "Blocks", bname, "Input", "P_OUT")
+                    blk_type = None
+                    try:
+                        blk_type = b.Value
+                    except Exception:
+                        pass
+                    bin_pres = None
+                    if blk_type not in _PRESSURE_SPEC_TYPES:
+                        bin_pres = walk(tree, "Data", "Blocks", bname, "Input", "PRES")
                     ports = walk(tree, "Data", "Blocks", bname, "Ports")
-                    if ports is not None:
-                        for pi in range(30):
+                    if ports is None:
+                        continue
+                    for p in _enumerate(ports, 30):
+                        pname = p.Name
+                        try:
+                            els = p.Elements
+                            count = els.Count
+                        except Exception:
+                            enumeration_interrupted = True
+                            continue
+                        for ei in range(count):
                             try:
-                                p = ports.Elements(pi)
+                                sname = els.Item(ei).Name
                             except Exception:
-                                break
-                            if p is None:
-                                break
-                            if "(IN)" in p.Name:
+                                enumeration_interrupted = True
+                                continue
+                            if not sname:
+                                continue
+                            connected.add(sname)
+                            if "(IN)" in pname and bin_pres is not None:
                                 try:
-                                    els = p.Elements
-                                    for ei in range(els.Count):
-                                        try:
-                                            sname = els.Item(ei).Name
-                                            sp = walk(tree, "Data", "Streams", sname, "Output", "PRES_OUT")
-                                            if sp is not None and sp.Value:
-                                                if bin_pres is not None and sp.Value and abs(float(sp.Value) - float(bin_pres.Value)) > 10:
-                                                    warnings.append(
-                                                        f"Pressure mismatch: Stream '{sname}' enters '{bname}' "
-                                                        f"at {sp.Value} bar, block expects ~{bin_pres.Value} bar"
-                                                    )
-                                        except Exception:
-                                            pass
+                                    sp = walk(tree, "Data", "Streams", sname, "Output", "PRES_OUT")
+                                    if sp is None or not sp.Value or not bin_pres.Value:
+                                        continue
+                                    if str(sp.UnitString) != str(bin_pres.UnitString):
+                                        continue
+                                    if abs(float(sp.Value) - float(bin_pres.Value)) > 10:
+                                        unit = str(sp.UnitString)
+                                        warnings.append(
+                                            f"Pressure mismatch: Stream '{sname}' enters '{bname}' "
+                                            f"at {sp.Value} {unit}, block expects ~{bin_pres.Value} {unit}"
+                                        )
                                 except Exception:
                                     pass
 
-            # 检查未连接的进料流股
+            # 未连接进料流股：以 Ports 索引为准，Output 仅补充
             streams = walk(tree, "Data", "Streams")
             if streams is not None:
-                for si in range(200):
-                    try:
-                        s = streams.Elements(si)
-                    except Exception:
-                        break
-                    if s is None:
-                        break
+                for s in _enumerate(streams, 200):
                     sname = s.Name
+                    if sname in connected:
+                        continue
                     dest = walk(tree, "Data", "Streams", sname, "Output", "DESTINATION")
-                    if dest is None or not dest.Value:
-                        src = walk(tree, "Data", "Streams", sname, "Output", "SOURCE")
-                        if src is None or not src.Value:
-                            temp = walk(tree, "Data", "Streams", sname, "Input", "TEMP", "MIXED")
-                            if temp is not None and temp.Value:
-                                warnings.append(
-                                    f"Unconnected stream '{sname}' has TEMP set but no destination"
-                                )
+                    if dest is not None and dest.Value:
+                        continue
+                    src = walk(tree, "Data", "Streams", sname, "Output", "SOURCE")
+                    if src is not None and src.Value:
+                        continue
+                    temp = walk(tree, "Data", "Streams", sname, "Input", "TEMP", "MIXED")
+                    if temp is not None and temp.Value:
+                        warnings.append(
+                            f"Unconnected stream '{sname}' has TEMP set but no destination"
+                        )
 
+            if enumeration_interrupted:
+                warnings.append(
+                    "UNKNOWN: Ports enumeration interrupted; connection checks may be incomplete"
+                )
             return warnings
         return aspen.call(impl)
     except Exception:

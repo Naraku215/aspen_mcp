@@ -25,6 +25,8 @@ Strategy:
 """
 from __future__ import annotations
 
+import json
+import math
 from typing import Any
 
 
@@ -125,90 +127,210 @@ _CONVERSIONS: dict[tuple[str, str], Any] = {
 }
 
 
-def _row(node: Any) -> int | None:
-    """Quantity-dimension id of a node (HAP_UNITROW = 2)."""
+_ROW_BASE = {11: "KMOL/SEC", 13: "W", 20: "N/SQM", 22: "K"}
+
+
+def finite_number(value) -> float:
+    """统一接受 JSON 数字及带空白/科学计数法的数字字符串。"""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError("需要有限数字，禁止 bool")
     try:
-        r = node.AttributeValue(2)
-        return int(r) if isinstance(r, (int, float)) else None
-    except Exception:
-        return None
+        number = float(value)
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(f"非法数字: {value!r}") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"禁止 NaN/Inf 或溢出: {value!r}")
+    return number
+
+
+def _coordinate(node: Any, attribute: int) -> int:
+    try:
+        value = node.AttributeValue(attribute)
+    except Exception as exc:
+        raise ValueError(f"AttributeValue({attribute}) 失败: {exc}") from exc
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value != int(value) or value < 0):
+        raise ValueError(f"无效单位坐标 attribute={attribute}: {value!r}")
+    return int(value)
+
+
+def _row(node: Any) -> int:
+    """严格读取量纲，不把读取异常解释成无量纲。"""
+    return _coordinate(node, 2)
 
 
 def _si_col(row: int | None) -> int | None:
-    """SI unit column for a quantity row, or None if unknown."""
-    if row is None:
-        return None
     return _ROW_SI_COL.get(row)
 
 
+def _coordinates(node: Any) -> tuple[int, int]:
+    if node is None:
+        raise ValueError("write_value: node is None")
+    row, col = _row(node), _coordinate(node, 3)
+    if (row, col) == (0, 0):
+        return row, col
+    if row not in _ROW_BASE or (row, col) not in _UNIT_COORDS.values():
+        raise ValueError(f"unsupported: 未验证的单位坐标 row={row}, col={col}")
+    return row, col
+
+
+def read_si_result(node: Any) -> dict:
+    """读取结果保留实际来源和异常，失败后绝不返回原始 Value。"""
+    result = {"ok": False, "value": None, "read_source": None, "error": None}
+    try:
+        result["read_source"] = "unit_metadata"
+        row, col = _coordinates(node)
+        result.update(row=row, col=col)
+        if row == 0:
+            result["read_source"] = "Value(dimensionless)"
+            value = node.Value
+        else:
+            result["read_source"] = f"ValueForUnit({row},{_si_col(row)})"
+            value = node.ValueForUnit(row, _si_col(row))
+        result.update(ok=True, value=finite_number(value))
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 def read_si(node: Any):
-    """Read a node's value in its internal SI unit (stable across unit sets)."""
+    """兼容数值返回接口；SI 失败显式抛错而非返回显示值。"""
     if node is None:
         return None
-    row = _row(node)
-    col = _si_col(row)
-    if col is not None:
-        try:
-            return node.ValueForUnit(row, col)
-        except Exception:
-            pass
-    try:
-        return node.Value
-    except Exception:
-        return None
+    result = read_si_result(node)
+    if not result["ok"]:
+        raise ValueError(f"{result['read_source']}: {result['error']}")
+    return result["value"]
+
+
+def _prepare_numeric(node, value, user_unit=None, base_internal=None):
+    value = finite_number(value)
+    row, _ = _coordinates(node)
+    if row == 0:
+        if user_unit is not None or base_internal not in (None, "1"):
+            raise ValueError("无量纲数值不得携带物理单位")
+        return value, None, value
+    base = _ROW_BASE[row]
+    if base_internal is not None and _norm(base_internal) != base:
+        raise ValueError(f"量纲不符: row={row}, base_internal={base_internal}")
+    expected = convert_by_name(value, user_unit, base)
+    if user_unit is None:
+        return value, _si_col(row), expected
+    coord = _UNIT_COORDS.get(_norm(user_unit))
+    if coord is not None:
+        if coord[0] != row:
+            raise ValueError(f"单位与量纲不符: {user_unit}, row={row}")
+        return value, coord[1], expected
+    return expected, _si_col(row), expected
 
 
 def write_value(node: Any, value, user_unit: str | None = None,
                 base_internal: str | None = None) -> None:
-    """Write a numeric value into a COM node, unit-aware.
-
-    Semantics:
-      - user_unit None      => value is ALREADY in the node's SI unit; write
-                               natively with the SI column (exact).
-      - user_unit given     => if the unit has a native (row, col) coordinate,
-                               use ``SetValueAndUnit(value, col)`` (Aspen
-                               converts); otherwise convert with the Python
-                               table to SI and write with the SI column.
-      - base_internal       => known SI unit name of the node's quantity
-                               (e.g. "K", "N/SQM", "W", "KMOL/SEC"), used for
-                               the Python-table fallback look-up.
-
-    ``SetValueAndUnit`` failures (dimensionless nodes, weird rows) fall back
-    to the legacy ``node.SetValue(0, value)`` so existing behaviour is kept.
-    """
+    """仅按预验证的单位方案写一次；原生写失败不重试、不裸写。"""
     if node is None:
         raise ValueError("write_value: node is None")
-    row = _row(node)
-    si_col = _si_col(row)
-    if user_unit is None:
-        target_col = si_col
-        target_value = value
+    target, col, _ = _prepare_numeric(node, value, user_unit, base_internal)
+    if col is None:
+        node.SetValue(0, target)
     else:
-        coord = _UNIT_COORDS.get(_norm(user_unit))
-        if coord is not None:
-            target_col = coord[1]
-            target_value = value
+        node.SetValueAndUnit(target, col)
+
+
+def write_node_value(node, value, user_unit=None, base_internal=None) -> dict:
+    """写与读回各自报告状态；任何写异常都表示该目标可能已改变。"""
+    report = {"ok": False, "write": {"status": "not_attempted"},
+              "verify": {"status": "not_attempted"}}
+    try:
+        if node is None:
+            raise ValueError("node is None")
+        is_text = isinstance(node.Value, str)
+        if is_text:
+            if user_unit is not None or not isinstance(value, str):
+                raise ValueError("文本/枚举必须保持文本且不得携带 unit")
+            target, col, expected = value, None, value
         else:
-            base = _norm(base_internal or "")
-            if base:
-                fn = _CONVERSIONS.get((_norm(user_unit), base))
-            else:
-                fn = None
-            if fn is None and base:
-                raise ValueError(
-                    f"No unit conversion registered for '{user_unit}' -> "
-                    f"'{base}'. If the value is already in internal SI "
-                    f"({base}), call with unit=None."
-                )
-            target_value = value if fn is None else fn(value)
-            target_col = si_col
-    if target_col is not None:
+            target, col, expected = _prepare_numeric(node, value, user_unit, base_internal)
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return report
+    report["write"] = {"status": "failed", "possibly_changed": True,
+                       "write_source": "SetValue" if col is None else f"SetValueAndUnit({col})"}
+    try:
+        if col is None:
+            node.SetValue(0, target)
+        else:
+            node.SetValueAndUnit(target, col)
+    except Exception as exc:
+        report["write"]["error"] = f"{type(exc).__name__}: {exc}"
+        return report
+    report["write"]["status"] = "ok"
+    if is_text:
+        verification = {"ok": False, "read_source": "Value(text)", "value": None}
         try:
-            node.SetValueAndUnit(target_value, target_col)
-            return
+            verification["value"] = node.Value
+            verification["ok"] = verification["value"] == expected
+        except Exception as exc:
+            verification["error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        verification = read_si_result(node)
+        if verification["ok"]:
+            verification["ok"] = math.isclose(verification["value"], expected,
+                                               rel_tol=1e-6, abs_tol=1e-9)
+    verification.update(status="ok" if verification["ok"] else "failed", expected=expected)
+    report["verify"] = verification
+    report["ok"] = verification["ok"]
+    return report
+
+
+def format_write_result(report: dict) -> str:
+    return ("OK: " if report["ok"] else "Error: ") + json.dumps(report, ensure_ascii=False, allow_nan=False)
+
+
+# ── 未验证流股路径守卫 ─────────────────────────────────────────────────
+# FLOW/TOTAL/TOTFLOW/BASIS 的原生语义尚未验证（不得猜测 attribute 13、
+# TOTAL 或 TOTFLOW），通用路径入口必须在写前拒绝并指向显式契约接口。
+_STREAM_GUARDED_SECTIONS = {"FLOW", "TOTAL", "TOTFLOW"}
+
+
+def guard_stream_path(path: str) -> str | None:
+    """受限流股路径检查；返回拒绝原因，None 表示可通过。"""
+    if not isinstance(path, str) or not path:
+        return None
+    parts = [p.strip().upper() for p in path.replace("/", "\\").strip("\\").split("\\") if p.strip()]
+    for i, token in enumerate(parts):
+        if token != "STREAMS" or i + 2 >= len(parts) or parts[i + 2] != "INPUT":
+            continue
+        section = parts[i + 3] if i + 3 < len(parts) else ""
+        if section in _STREAM_GUARDED_SECTIONS or section.startswith("BASIS"):
+            return (f"unsupported: 流股路径 '{section}' 属于未验证的组成/总量契约；"
+                    f"必须使用 set_stream_composition_batch 等显式能力接口，禁止通用猜写")
+        return None
+    return None
+
+
+def unsupported_report(path: str, reason: str) -> dict:
+    """通用入口的未支持报告；保持与写报告同形，不声称已尝试。"""
+    return {"ok": False, "status": "unsupported", "error": reason, "target": path,
+            "write": {"status": "not_attempted"}, "verify": {"status": "not_attempted"}}
+
+
+def write_path_value(tree, path, value, unit=None) -> dict:
+    """公共路径写入；匹配子名称只用于选择文本节点，不吞掉写异常。"""
+    guard = guard_stream_path(path)
+    if guard is not None:
+        return unsupported_report(path, guard)
+    node = tree.FindNode(path)
+    if node is not None and isinstance(value, str):
+        try:
+            count = node.Elements.Count
         except Exception:
-            pass
-    node.SetValue(0, target_value)
+            count = 0
+        for i in range(count):
+            child = node.Elements(i)
+            if child is not None and child.Name.upper() == value.upper():
+                node = child
+                break
+    return write_node_value(node, value, user_unit=unit)
 
 
 def convert_value(value, user_unit: str | None, node: Any = None):
@@ -221,6 +343,14 @@ def convert_value(value, user_unit: str | None, node: Any = None):
     unit=None passes through unchanged (assumes the value is already SI).
     Unknown units raise ValueError naming the supported unit labels.
     """
+    value = finite_number(value)
+    if node is not None:
+        row, _ = _coordinates(node)
+        if row == 0:
+            if user_unit is not None:
+                raise ValueError("无量纲数值不得携带物理单位")
+            return value
+        return convert_by_name(value, user_unit, _ROW_BASE[row])
     if user_unit is None:
         return value
     return _convert_si(value, user_unit)
@@ -231,8 +361,11 @@ def convert_by_name(value, user_unit: str | None, internal_unit: str):
 
     unit=None passes through. Same-unit pairs pass through (Bug-4 fix).
     """
+    value = finite_number(value)
     if user_unit is None:
         return value
+    if not isinstance(user_unit, str) or not user_unit.strip():
+        raise ValueError("unit 必须是非空字符串")
     sn, tn = _norm(user_unit), _norm(internal_unit)
     if sn == tn:
         return float(value)
@@ -243,11 +376,13 @@ def convert_by_name(value, user_unit: str | None, internal_unit: str):
             f"'{internal_unit}'. If the value is already in internal SI "
             f"({internal_unit}), call with unit=None."
         )
-    return fn(value)
+    return finite_number(fn(value))
 
 
 def _convert_si(value, user_unit: str) -> float:
     """Convert to SI, trying each known SI base till a mapping exists."""
+    if not isinstance(user_unit, str) or not user_unit.strip():
+        raise ValueError("unit 必须是非空字符串")
     sn = _norm(user_unit)
     for target in ("K", "N/SQM", "KMOL/SEC", "KG/SEC", "W"):
         fn = _CONVERSIONS.get((sn, target))

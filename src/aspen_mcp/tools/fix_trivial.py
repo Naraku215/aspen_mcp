@@ -152,18 +152,26 @@ _TRIVIAL_PARAMS: dict[str, int | str] = {
 }
 
 
-def tool_fill_trivial_params(random_string: str | None = None) -> str:
-    """Fill trivial/meaningless active-but-unset params across all blocks.
+def tool_fill_trivial_params(random_string: str | None = None,
+                             objects: list[str] | None = None,
+                             params: list[str] | None = None,
+                             dry_run: bool = True) -> str:
+    """Preview or fill trivial/meaningless active-but-unset params.
 
-    Many parameters show up in find_incomplete_inputs() because they are
-    "active" (i7=1) but never filled — they are COM infrastructure, UI
-    artifacts, estimation placeholders, or dynamic/holdup params irrelevant
-    to steady-state simulation. This function fills them with safe defaults
-    (0 for numbers, "" for strings) so that subsequent diagnostics only
-    show the truly important missing parameters.
+    Default dry_run=True: preview only, zero writes. An explicit write
+    requires both scope lists (objects and params) and dry_run=False;
+    candidates stay limited to the _TRIVIAL_PARAMS safe list.
 
-    Returns a report of what was filled, per block.
+    Fills use safe defaults (0 for numbers, "" for strings).
+    Returns a report of candidates (preview) or of what was filled.
     """
+    object_filter = {str(o) for o in objects} if objects else None
+    param_filter = {str(p) for p in params} if params else None
+    write_mode = (not dry_run) and object_filter is not None and param_filter is not None
+    if not dry_run and not write_mode:
+        return ("Error: dry_run=False 需要同时提供 objects 与 params 两类 scope；"
+                "无作用域的全局填充已移除。默认 dry_run=True 仅预览。")
+
     def impl():
         tree = aspen._app.RootModel("")
         blks = walk(tree, "Data", "Blocks")
@@ -182,6 +190,8 @@ def tool_fill_trivial_params(random_string: str | None = None) -> str:
                 break
             
             bname = b.Name
+            if object_filter is not None and bname not in object_filter:
+                continue
             inp = walk(tree, "Data", "Blocks", bname, "Input")
             if inp is None:
                 continue
@@ -197,6 +207,8 @@ def tool_fill_trivial_params(random_string: str | None = None) -> str:
                 
                 pname = n.Name
                 if pname not in _TRIVIAL_PARAMS:
+                    continue
+                if param_filter is not None and pname not in param_filter:
                     continue
                 
                 # Only fill if active (i7=1) and not user-set (i11=0)
@@ -217,24 +229,36 @@ def tool_fill_trivial_params(random_string: str | None = None) -> str:
                 except Exception:
                     pass
                 
-                # Fill it
+                # Explicit scoped write, or preview candidate
                 default_val = _TRIVIAL_PARAMS[pname]
-                try:
-                    n.SetValue(0, default_val)
+                if write_mode:
+                    try:
+                        n.SetValue(0, default_val)
+                    except Exception as exc:
+                        filled.append(f"{pname} (write failed: {exc})")
+                        continue
+                else:
                     filled.append(pname)
-                    total_filled += 1
-                except Exception:
-                    pass
+                total_filled += 1
             
             if filled:
                 lines.append(f"  [{bname}]: {', '.join(filled)}")
         
         if not lines:
-            return "No trivial params found to fill."
+            if write_mode:
+                return "No trivial params found to fill."
+            return "FILL PREVIEW (nothing written): no trivial params found."
         
-        report = f"Filled {total_filled} trivial params across {len(lines)} blocks:\n"
+        if write_mode:
+            report = f"Filled {total_filled} trivial params across {len(lines)} blocks:\n"
+        else:
+            report = (f"FILL PREVIEW (nothing written) — {total_filled} trivial candidates "
+                      f"across {len(lines)} blocks:\n")
         report += "\n".join(lines)
-        report += "\n\nNow run find_incomplete_inputs() to see what's truly missing."
+        if write_mode:
+            report += "\n\nNow run find_incomplete_inputs() to see what's truly missing."
+        else:
+            report += "\n\nPreview only; pass objects+params with dry_run=False to write explicitly."
         return report
     
     return aspen.call(impl)

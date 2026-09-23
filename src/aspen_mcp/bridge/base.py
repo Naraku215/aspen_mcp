@@ -17,8 +17,12 @@ class AspenBridge(ABC):
     """
 
     @abstractmethod
-    def call(self, fn: Callable) -> Any:
-        """在正确上下文执行 fn。Windows: COM 线程；Stub: 同步。"""
+    def call(self, fn: Callable, timeout: float | None = None) -> Any:
+        """在正确上下文执行 fn。Windows: COM 线程；Stub: 同步。
+
+        timeout 为 None 时用桥默认超时（普通请求 ≤30 秒）；
+        RUN 生命周期类调用显式传入更长超时（≤60 秒），且不重试、不重放。
+        """
         ...
 
     @property
@@ -56,19 +60,22 @@ class AspenBridge(ABC):
     @abstractmethod
     def run_script(self, file_path: str) -> None: ...
     @abstractmethod
-    def set_stream_param(self, stream_name: str, param: str, value: float,
-                         basis: str | None = None) -> bool: ...
+    def set_stream_param(self, stream_name: str, param: str, value: str | float,
+                         *legacy: str, basis: str | None = None, unit: str | None = None,
+                         total_basis: str | None = None) -> dict: ...
     @abstractmethod
-    def set_stream_composition(self, stream_name: str, component: str,
-                               flow: float) -> bool: ...
+    def set_stream_composition(self, stream_name: str, component: str, flow: str | float,
+                               *legacy: str, unit: str | None = None, basis: str | None = None,
+                               total_basis: str | None = None) -> dict: ...
     @abstractmethod
-    def set_stream_composition_batch(self, stream_name: str,
-                                     components: dict, basis: str = "MOLE-FLOW",
-                                     total_flow: float | None = None) -> str: ...
+    def set_stream_composition_batch(self, stream_name: str, components: dict,
+                                     basis: str = "MOLE-FLOW", total_flow: float | None = None,
+                                     unit: str | None = None, *, total_basis: str | None = None,
+                                     total_unit: str | None = None) -> dict: ...
     @abstractmethod
     def get_value(self, *parts: str) -> Any: ...
     @abstractmethod
-    def set_value(self, value: Any, *parts: str) -> bool: ...
+    def set_value(self, value: Any, *parts: str, unit: str | None = None) -> bool: ...
     @abstractmethod
     def get_path_value(self, path: str) -> Any: ...
     @abstractmethod

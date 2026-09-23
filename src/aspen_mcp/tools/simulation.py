@@ -137,6 +137,40 @@ def _check_feeds_before_run() -> str | None:
         return aspen.call(impl)
     except Exception:
         return None
+
+def _execution_ledger():
+    """共享执行账本；独立函数便于离线测试注入。"""
+    from ..execution import get_ledger
+    return get_ledger()
+
+def _claim_native_run() -> dict:
+    """三 run 入口共用准入：首跑用尽后，仅有显式 TUNE 授权才可继续。"""
+    ledger = _execution_ledger()
+    claim = ledger.claim_run(kind="initial")
+    if claim["status"] == "accepted":
+        return claim
+    if claim["reason"] == "budget_exhausted":
+        tune = ledger.claim_run(kind="tune")
+        if tune["status"] == "accepted":
+            return tune
+    return claim
+
+def _blocked_run_message(claim: dict) -> str:
+    return ("Error: RUN 被阻断（" + str(claim.get("reason")) + "）。"
+            "额度、授权与沿袭绑定任务，不能通过请求增额；请人工确认后继续。")
+
+_RUN_TIMEOUT_MESSAGE = ("Error: RUN 超时，结果未知（outcome_unknown）。已保留主机侧证据，"
+                        "不自动重试；请人工确认引擎状态后再决定恢复方式。")
+
+def _record_run_outcome(claim: dict, exc: Exception | None = None) -> None:
+    """记录终态；超时类异常记为 outcome_unknown，额度不退。"""
+    if exc is None:
+        outcome = "completed"
+    elif isinstance(exc, TimeoutError):
+        outcome = "outcome_unknown"
+    else:
+        outcome = "failed"
+    _execution_ledger().record_outcome(run_id=claim["run_id"], outcome=outcome)
 def tool_status(random_string: str | None = None) -> dict:
     """Return the current Aspen Plus connection / engine status."""
     return aspen.status()
@@ -170,7 +204,15 @@ def tool_run(random_string: str | None = None) -> str:
         feed_ok = _check_feeds_before_run()
         if feed_ok:
             return feed_ok
-        aspen.run()
+        claim = _claim_native_run()
+        if claim["status"] != "accepted":
+            return _blocked_run_message(claim)
+        try:
+            aspen.run()
+        except Exception as exc:
+            _record_run_outcome(claim, exc)
+            raise
+        _record_run_outcome(claim)
         report = aspen.call(lambda: _get_convergence_report())
         result = "Simulation run completed.\n\n" + (report or "")
         warning = _check_all_uncalculated()
@@ -179,12 +221,21 @@ def tool_run(random_string: str | None = None) -> str:
         return result
     except Exception as exc:
         exc_str = str(exc)
+        if isinstance(exc, TimeoutError):
+            return _RUN_TIMEOUT_MESSAGE
         if "RPC" in exc_str or chr(26381) in exc_str:
             return "COM error: " + str(exc) + ". Try close_file() then open_file() to recover, then reinit_and_run()."
         return "Error: " + str(exc)
 def tool_run_async(random_string: str | None = None) -> str:
-    """Run the simulation (asynchronous, non-blocking)."""
+    """Run the simulation (asynchronous, non-blocking).
+
+    异步派发后保持运行态占用（claim 待定），直到可靠终态；
+    禁止第二跑与模型写入，允许受控只读状态轮询。
+    """
     try:
+        claim = _claim_native_run()
+        if claim["status"] != "accepted":
+            return _blocked_run_message(claim)
         aspen.run_async()
         return "Async simulation started"
     except Exception as exc:
@@ -212,7 +263,15 @@ def tool_reinit_and_run(random_string: str | None = None) -> str:
         feed_ok = _check_feeds_before_run()
         if feed_ok:
             return feed_ok
-        aspen.reinit_and_run()
+        claim = _claim_native_run()
+        if claim["status"] != "accepted":
+            return _blocked_run_message(claim)
+        try:
+            aspen.reinit_and_run()
+        except Exception as exc:
+            _record_run_outcome(claim, exc)
+            raise
+        _record_run_outcome(claim)
         report = aspen.call(lambda: _get_convergence_report())
         result = "Simulation reinitialized and run completed.\n\n" + (report or "")
         warning = _check_all_uncalculated()
@@ -221,6 +280,8 @@ def tool_reinit_and_run(random_string: str | None = None) -> str:
         return result
     except Exception as exc:
         exc_str = str(exc)
+        if isinstance(exc, TimeoutError):
+            return _RUN_TIMEOUT_MESSAGE
         if "RPC" in exc_str or chr(26381) in exc_str:
             return "COM error: " + str(exc) + ". Try close_file() then open_file() to recover, then reinit_and_run() again."
         return "Error: " + str(exc)
@@ -264,7 +325,12 @@ def tool_run_script(file_path: str) -> str:
     '''Run a Python script inside Aspen Plus.
     The script runs in Aspen's internal Python environment,
     not the MCP host environment.
+    建模任务活跃或沿袭确认挂起期间，本通道关闭（禁绕行原生运行）。
     '''
+    guard = _execution_ledger().script_guard()
+    if not guard["allowed"]:
+        return ("Error: run_script 被阻断（" + guard["reason"] + "）；"
+                "建模任务服务端禁止 run_script 绕行原生运行，请使用受控 run 入口。")
     try:
         aspen.run_script(file_path)
         return "Script '" + file_path + "' executed."
