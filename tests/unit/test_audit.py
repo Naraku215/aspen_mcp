@@ -3,8 +3,11 @@ import asyncio
 import importlib
 import inspect
 import json
+import os
 
 import pytest
+
+from aspen_mcp.tool_audit import default_audit_directory
 
 
 def audit():
@@ -141,3 +144,19 @@ def test_server_registers_configuration_tools():
     tools = asyncio.run(server.mcp_server._list_tools())
     names = {tool.name for tool in tools}
     assert {"configure_model", "inspect_configuration"} <= names
+
+
+def test_default_audit_directory_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ASPEN_MCP_AUDIT_DIR", str(tmp_path / "audit"))
+    assert default_audit_directory() == str(tmp_path / "audit")
+
+
+def test_default_audit_directory_falls_back_when_cwd_unwritable(monkeypatch, tmp_path):
+    monkeypatch.delenv("ASPEN_MCP_AUDIT_DIR", raising=False)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")  # 文件挡住子目录创建 → OSError
+    monkeypatch.setattr(os, "getcwd", lambda: str(blocker / "sub"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    result = default_audit_directory()
+    assert result == str(tmp_path / "local" / "aspen-mcp" / "audit")
+    assert os.path.isdir(result)

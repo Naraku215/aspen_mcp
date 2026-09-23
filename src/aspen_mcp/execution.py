@@ -30,8 +30,19 @@ MAX_ANALYSIS_RUNS = 50
 
 
 def default_state_directory() -> str:
-    """服务未配置目录时使用工作目录专用子目录，不写入历史 case。"""
-    return os.environ.get("ASPEN_MCP_STATE_DIR") or os.path.join(os.getcwd(), ".aspen_mcp_state")
+    """状态目录：env 优先；cwd 子目录不可写时回落用户可写目录。"""
+    override = os.environ.get("ASPEN_MCP_STATE_DIR")
+    if override:
+        return override
+    cwd_dir = os.path.join(os.getcwd(), ".aspen_mcp_state")
+    try:
+        os.makedirs(cwd_dir, exist_ok=True)
+        return cwd_dir
+    except OSError:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        fallback = os.path.join(base, "aspen-mcp", "state")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
 
 
 class ExecutionLedger:

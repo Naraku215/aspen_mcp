@@ -1,6 +1,7 @@
 """执行额度、沿袭、deadline 与 COM 队列超时隔离（离线，无真实 COM）。"""
 import importlib
 import json
+import os
 
 import pytest
 
@@ -305,3 +306,14 @@ def test_run_script_allowed_without_active_task(monkeypatch, tmp_path):
     result = module.tool_run_script("demo.py")
     assert "Error" not in result
     assert [c for c in bridge.calls if c[0] == "run_script"] == [("run_script", ("demo.py",), {})]
+
+
+def test_default_state_directory_falls_back_when_cwd_unwritable(monkeypatch, tmp_path):
+    monkeypatch.delenv("ASPEN_MCP_STATE_DIR", raising=False)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")  # 文件挡住子目录创建 → OSError
+    monkeypatch.setattr(os, "getcwd", lambda: str(blocker / "sub"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    result = execution().default_state_directory()
+    assert result == str(tmp_path / "local" / "aspen-mcp" / "state")
+    assert os.path.isdir(result)
