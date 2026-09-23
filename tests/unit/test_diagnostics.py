@@ -269,3 +269,81 @@ def test_fill_with_scopes_writes(fake_windows, node_class, monkeypatch):
         objects=["B1"], params=["PSVBY"], dry_run=False)
     assert target.writes, result
     assert "preview" not in result.lower()
+
+
+# ── 导出回执：产物存在性核验，静默失败不谎报 ────────────────────────────────
+
+def test_generate_input_summary_reports_missing_product(monkeypatch, tmp_path):
+    from aspen_mcp.tools import analysis
+
+    class FakeAspen:
+        def generate_input_summary(self, path):
+            pass  # 静默失败：不抛异常也不产出
+
+    monkeypatch.setattr(analysis, "aspen", FakeAspen())
+    target = str(tmp_path / "sub" / "out.bkp")
+    result = analysis.tool_generate_input_summary(target)
+    assert result.startswith("Error: export returned without error")
+    assert not (tmp_path / "sub" / "out.bkp").exists()
+
+
+def test_generate_input_summary_creates_parent_and_reports_size(monkeypatch, tmp_path):
+    from aspen_mcp.tools import analysis
+
+    class FakeAspen:
+        def generate_input_summary(self, path):
+            with open(path, "wb") as f:
+                f.write(b"x" * 10)
+
+    monkeypatch.setattr(analysis, "aspen", FakeAspen())
+    target = str(tmp_path / "sub" / "out.bkp")
+    result = analysis.tool_generate_input_summary(target)
+    assert result.endswith("(10 bytes)")
+    assert (tmp_path / "sub" / "out.bkp").exists()
+
+
+def test_export_report_file_reports_missing_product(monkeypatch, tmp_path):
+    from aspen_mcp.tools import analysis
+
+    class FakeEngine:
+        def ExportReport(self, path, code):
+            pass  # 静默失败：不抛异常也不产出
+
+    class FakeApp:
+        Engine = FakeEngine()
+
+    class FakeAspen:
+        _app = FakeApp()
+
+        def call(self, fn):
+            return fn()
+
+    monkeypatch.setattr(analysis, "aspen", FakeAspen())
+    target = str(tmp_path / "sub" / "report.txt")
+    result = analysis.tool_export_report_file(target)
+    assert result.startswith("Error: export returned without error")
+    assert not (tmp_path / "sub" / "report.txt").exists()
+
+
+def test_export_report_file_creates_parent_and_reports_size(monkeypatch, tmp_path):
+    from aspen_mcp.tools import analysis
+
+    class FakeEngine:
+        def ExportReport(self, path, code):
+            with open(path, "wb") as f:
+                f.write(b"x" * 10)
+
+    class FakeApp:
+        Engine = FakeEngine()
+
+    class FakeAspen:
+        _app = FakeApp()
+
+        def call(self, fn):
+            return fn()
+
+    monkeypatch.setattr(analysis, "aspen", FakeAspen())
+    target = str(tmp_path / "sub" / "report.txt")
+    result = analysis.tool_export_report_file(target)
+    assert result.endswith("(10 bytes)")
+    assert (tmp_path / "sub" / "report.txt").exists()

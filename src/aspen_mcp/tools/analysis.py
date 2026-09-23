@@ -7,6 +7,7 @@ COM apartment thread.
 from __future__ import annotations
 
 from typing import Any
+import os
 
 from ..com_bridge import aspen
 from ..knowledge.convergence import search_failures
@@ -17,10 +18,13 @@ from ._common import walk
 
 
 def tool_export_report_file(file_path: str) -> str:
-    """Export the simulation report using Engine.ExportReport."""
+    """Export the simulation report; verify the product exists."""
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
         aspen.call(lambda: aspen._app.Engine.ExportReport(file_path, 13))
-        return f"Report exported to {file_path}"
+        if not os.path.isfile(file_path):
+            return f"Error: export returned without error but no file was created at {file_path}"
+        return f"Report exported to {file_path} ({os.path.getsize(file_path)} bytes)"
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -375,10 +379,13 @@ def tool_search_convergence_knowledge(keywords: list[str]) -> list[dict]:
 
 
 def tool_generate_input_summary(file_path: str) -> str:
-    """Generate a .bkp input summary."""
+    """Generate a .bkp input summary; verify the product exists."""
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
         aspen.generate_input_summary(file_path)
-        return f"Input summary written to {file_path}"
+        if not os.path.isfile(file_path):
+            return f"Error: export returned without error but no file was created at {file_path}"
+        return f"Input summary written to {file_path} ({os.path.getsize(file_path)} bytes)"
     except Exception as exc:
         return f"Error: {exc}"
 
