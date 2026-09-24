@@ -230,16 +230,39 @@ def tool_run_async(random_string: str | None = None) -> str:
     """Run the simulation (asynchronous, non-blocking).
 
     异步派发后保持运行态占用（claim 待定），直到可靠终态；
+    派发成功返回 run_id，终态需经 report_run_outcome 显式回收。
     禁止第二跑与模型写入，允许受控只读状态轮询。
     """
     try:
         claim = _claim_native_run()
         if claim["status"] != "accepted":
             return _blocked_run_message(claim)
-        aspen.run_async()
-        return "Async simulation started"
+        try:
+            aspen.run_async()
+        except Exception as exc:
+            _record_run_outcome(claim, exc)
+            raise
+        return (f"Async simulation started (run_id={claim['run_id']})。"
+                "终态需显式回收：运行结束后调用 report_run_outcome(run_id, outcome)。")
     except Exception as exc:
         return "Error: " + str(exc)
+
+
+_TERMINAL_OUTCOMES = ("completed", "failed", "outcome_unknown")
+
+
+def tool_report_run_outcome(run_id: str, outcome: str) -> str:
+    """回收异步运行的显式终态记录；不退还额度，仅终结 pending claim。"""
+    if outcome not in _TERMINAL_OUTCOMES:
+        return ("Error: outcome 必须是 " + "|".join(_TERMINAL_OUTCOMES)
+                + " 之一（不接受内部状态 pending）")
+    try:
+        _execution_ledger().record_outcome(run_id=run_id, outcome=outcome)
+    except Exception as exc:
+        return "Error: " + str(exc)
+    return f"Run {run_id} recorded as {outcome}"
+
+
 def tool_save(file_path: str | None = None) -> str:
     """Save the simulation. Optionally provide SaveAs path."""
     try:

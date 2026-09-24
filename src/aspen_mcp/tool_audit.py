@@ -20,6 +20,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from ._directories import default_directory
+
 _ATTACHMENT_THRESHOLD = 64_000
 _SENSITIVE_KEYS = {"password", "passwd", "token", "secret", "credential", "api_key"}
 _ERROR_STATUSES = {"failed", "unsupported", "partial_failure"}
@@ -29,18 +31,9 @@ _logger = logging.getLogger(__name__)
 
 def default_audit_directory() -> str:
     """审计目录：env 优先；cwd 子目录不可写时回落用户可写目录。"""
-    override = os.environ.get("ASPEN_MCP_AUDIT_DIR")
-    if override:
-        return override
-    cwd_dir = os.path.join(os.getcwd(), ".aspen_mcp_audit")
-    try:
-        os.makedirs(cwd_dir, exist_ok=True)
-        return cwd_dir
-    except OSError:
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        fallback = os.path.join(base, "aspen-mcp", "audit")
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+    return default_directory(env_var="ASPEN_MCP_AUDIT_DIR",
+                             cwd_subdir=".aspen_mcp_audit",
+                             fallback_subdir="audit")
 
 
 def _redact(value: Any) -> Any:

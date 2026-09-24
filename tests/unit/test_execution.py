@@ -1,4 +1,5 @@
 """执行额度、沿袭、deadline 与 COM 队列超时隔离（离线，无真实 COM）。"""
+import asyncio
 import importlib
 import json
 import os
@@ -317,3 +318,73 @@ def test_default_state_directory_falls_back_when_cwd_unwritable(monkeypatch, tmp
     result = execution().default_state_directory()
     assert result == str(tmp_path / "local" / "aspen-mcp" / "state")
     assert os.path.isdir(result)
+
+
+# ── run_async 终态回收：派发失败落账、显式回收通道 ────────────────────────
+
+def _async_harness(monkeypatch, tmp_path, *, fail_dispatch=False):
+    from aspen_mcp.bridge.stub import StubBridge
+    from aspen_mcp.tools import simulation
+    module = execution()
+    ledger = module.ExecutionLedger(path=str(tmp_path / "ledger.json"))
+    ledger.begin_task(task_id="T1", model_lineage_id="L1")
+    bridge = StubBridge()
+    if fail_dispatch:
+        def boom():
+            raise RuntimeError("dispatch failed")
+        bridge.run_async = boom
+    monkeypatch.setattr(simulation, "aspen", bridge)
+    monkeypatch.setattr(simulation, "_execution_ledger", lambda: ledger)
+    return bridge, ledger, simulation
+
+
+def _claims(ledger):
+    with open(ledger.path, encoding="utf-8") as handle:
+        return json.load(handle)["lineages"]["L1"]["claims"]
+
+
+def test_run_async_dispatch_failure_records_outcome(monkeypatch, tmp_path):
+    _bridge, ledger, module = _async_harness(monkeypatch, tmp_path, fail_dispatch=True)
+    result = module.tool_run_async()
+    assert "Error" in result
+    assert _claims(ledger)[0]["outcome"] == "failed"  # 派发失败不得遗留 pending
+
+
+def test_run_async_success_reports_run_id_and_stays_pending(monkeypatch, tmp_path):
+    _bridge, ledger, module = _async_harness(monkeypatch, tmp_path)
+    result = module.tool_run_async()
+    assert result.startswith("Async simulation started")
+    claim = _claims(ledger)[0]
+    assert claim["run_id"] in result
+    assert claim["outcome"] == "pending"  # 运行中占用：待显式终态回收
+
+
+def test_report_run_outcome_records_terminal_state(monkeypatch, tmp_path):
+    _bridge, ledger, module = _async_harness(monkeypatch, tmp_path)
+    module.tool_run_async()
+    run_id = _claims(ledger)[0]["run_id"]
+    result = module.tool_report_run_outcome(run_id, "completed")
+    assert "Error" not in result
+    assert _claims(ledger)[0]["outcome"] == "completed"
+
+
+def test_report_run_outcome_rejects_invalid_outcome(monkeypatch, tmp_path):
+    _bridge, ledger, module = _async_harness(monkeypatch, tmp_path)
+    module.tool_run_async()
+    run_id = _claims(ledger)[0]["run_id"]
+    result = module.tool_report_run_outcome(run_id, "pending")
+    assert result.startswith("Error")
+    assert _claims(ledger)[0]["outcome"] == "pending"
+
+
+def test_report_run_outcome_rejects_unknown_run_id(monkeypatch, tmp_path):
+    _bridge, _ledger, module = _async_harness(monkeypatch, tmp_path)
+    result = module.tool_report_run_outcome("deadbeef", "completed")
+    assert result.startswith("Error")
+
+
+def test_server_registers_async_outcome_recovery_tool():
+    server = importlib.import_module("aspen_mcp.server")
+    tools = asyncio.run(server.mcp_server._list_tools())
+    names = {tool.name for tool in tools}
+    assert "report_run_outcome" in names

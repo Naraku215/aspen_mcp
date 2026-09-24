@@ -378,3 +378,81 @@ def test_tear_estimate_still_reports_writable_param(fake_windows, node_class, mo
     result = analysis.tool_set_tear_estimate("FEED", temp=150.0)
     assert result.startswith("Tear stream 'FEED' estimate set")
     assert "TEMP=150" in result
+
+
+# ── 枚举健壮性：Count 优先、探测回退、异常标记 UNKNOWN ────────────────────
+
+class _ProbeCollection:
+    """模拟 Elements 集合：Count 可开关；越界异常类型可注入。"""
+
+    def __init__(self, items, *, expose_count, overflow):
+        self._items = items
+        self._expose_count = expose_count
+        self._overflow = overflow
+        self.probed = []
+
+    @property
+    def Count(self):
+        if not self._expose_count:
+            raise AttributeError("Count")
+        return len(self._items)
+
+    def __call__(self, key):
+        if not isinstance(key, int):
+            return {item.Name: item for item in self._items}.get(key)
+        self.probed.append(key)
+        if key >= len(self._items):
+            raise self._overflow(f"index {key} out of range")
+        return self._items[key]
+
+
+def _mount_streams_with_probe(tree, node_class, *, expose_count, overflow):
+    tree.mount(r"Data\Streams\S1", node_class("S1"))
+    tree.mount(r"Data\Streams\S2", node_class("S2"))
+    streams = tree.FindNode(r"Data\Streams")
+    collection = _ProbeCollection(list(streams.children.values()),
+                                  expose_count=expose_count, overflow=overflow)
+    streams.Elements = collection
+    return collection
+
+
+def test_warnings_count_first_avoids_overflow_probe(fake_windows, node_class, monkeypatch):
+    from aspen_mcp.tools import analysis
+
+    bridge, tree = fake_windows
+    monkeypatch.setattr(analysis, "aspen", bridge)
+    collection = _mount_streams_with_probe(tree, node_class,
+                                           expose_count=True, overflow=RuntimeError)
+
+    warnings = analysis.tool_simulation_warnings()
+
+    assert not any(w.startswith("UNKNOWN") for w in warnings), warnings
+    assert 2 not in collection.probed  # Count 已告知边界，无需触达越界异常
+
+
+def test_warnings_without_count_probes_until_index_error(fake_windows, node_class,
+                                                         monkeypatch):
+    from aspen_mcp.tools import analysis
+
+    bridge, tree = fake_windows
+    monkeypatch.setattr(analysis, "aspen", bridge)
+    collection = _mount_streams_with_probe(tree, node_class,
+                                           expose_count=False, overflow=IndexError)
+
+    warnings = analysis.tool_simulation_warnings()
+
+    assert not any(w.startswith("UNKNOWN") for w in warnings), warnings
+    assert collection.probed == [0, 1, 2]  # 越界即正常结束
+
+
+def test_warnings_enumeration_error_marks_unknown(fake_windows, node_class, monkeypatch):
+    from aspen_mcp.tools import analysis
+
+    bridge, tree = fake_windows
+    monkeypatch.setattr(analysis, "aspen", bridge)
+    _mount_streams_with_probe(tree, node_class,
+                              expose_count=False, overflow=RuntimeError)
+
+    warnings = analysis.tool_simulation_warnings()
+
+    assert any(w.startswith("UNKNOWN") for w in warnings), warnings

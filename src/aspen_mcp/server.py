@@ -18,6 +18,7 @@ from .tools.simulation import (
     tool_close_file,
     tool_run,
     tool_run_async,
+    tool_report_run_outcome,
     tool_save,
     tool_reinit,
     tool_reinit_and_run,
@@ -194,8 +195,16 @@ def create_server() -> FastMCP:
 
     @mcp.tool()
     def run_async(random_string: str | None = None) -> str:
-        """运行模拟（异步）。"""
+        """运行模拟（异步）。派发成功返回 run_id；终态用 report_run_outcome 显式回收。"""
         return tool_run_async(random_string)
+
+    @mcp.tool()
+    def report_run_outcome(run_id: str, outcome: str) -> str:
+        """报告异步运行的终态（completed | failed | outcome_unknown）。
+
+        仅回收 run_async 派发后待定的 claim；不退还运行额度。
+        """
+        return tool_report_run_outcome(run_id, outcome)
 
     @mcp.tool()
     def save(file_path: str | None = None) -> str:
@@ -283,28 +292,28 @@ def create_server() -> FastMCP:
         return tool_get_stream_composition_info(name)
 
     @mcp.tool()
-    def set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None, unit: str | None = None) -> str:
-        """Set a feed-stream input parameter. mutates=True.
+    def set_stream_param(stream_name: str, param: str, value: float, basis: str | None = None, unit: str | None = None) -> dict:
+        """Set a feed-stream input parameter. mutates=True. Returns a write/verify dict.
 
         Examples:
           set_stream_param("FEED", "TEMP", 25)       — temperature
           set_stream_param("FEED", "PRES", 1.5)       — pressure
-          set_stream_param("FEED", "TOTAL", 100)      — total molar flow
           set_stream_param("S1", "VFRAC", 0.0)        — vapor fraction
 
         Values are always stored in internal SI (K, Pa, kmol/s) regardless of
         the display Unit-Set. For engineering units pass the unit param
         (converted natively via SetValueAndUnit):
         set_stream_param("FEED","TEMP",25,unit="C"),
-        set_stream_param("FEED","PRES",1.5,unit="bar"),
-        set_stream_param("FEED","TOTAL",100,unit="kmol/hr").
+        set_stream_param("FEED","PRES",1.5,unit="bar").
         Without unit the value is taken as SI.
+        The total-flow channel is guarded (unverified contract): use
+        set_stream_composition_batch(total_flow=...) for total molar flow.
         For composition, use set_stream_composition_batch.
         """
         return tool_set_stream_param(stream_name, param, value, basis, unit)
 
     @mcp.tool()
-    def set_stream_composition(stream_name: str, component: str, flow: float, unit: str | None = None) -> str:
+    def set_stream_composition(stream_name: str, component: str, flow: float, unit: str | None = None) -> dict:
         """设置某组分的's 摩尔流量。
 
         NOTE: IDs over 8 chars get truncated (PROPYLENE -> PROPYLEN).
@@ -322,7 +331,7 @@ def create_server() -> FastMCP:
     def set_stream_composition_batch(stream_name: str, components: dict[str, float],
                                      basis: str = "MOLE-FLOW",
                                      total_flow: float | None = None,
-                                     unit: str | None = None) -> str:
+                                     unit: str | None = None) -> dict:
         """批量设置流股组成，带 BASIS 控制和可选总流量。
 
         Handles BASIS switching, all components, and total flow in one call.

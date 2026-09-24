@@ -147,6 +147,14 @@ def test_server_registers_configuration_tools():
     assert {"configure_model", "inspect_configuration"} <= names
 
 
+def test_set_stream_param_description_drops_guarded_total_example():
+    """已封禁的 TOTAL 通道不得再出现在工具描述中。"""
+    server = importlib.import_module("aspen_mcp.server")
+    tools = asyncio.run(server.mcp_server._list_tools())
+    tool = next(t for t in tools if t.name == "set_stream_param")
+    assert "TOTAL" not in (tool.description or "")
+
+
 def test_default_audit_directory_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("ASPEN_MCP_AUDIT_DIR", str(tmp_path / "audit"))
     assert default_audit_directory() == str(tmp_path / "audit")

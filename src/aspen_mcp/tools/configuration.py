@@ -465,29 +465,37 @@ def _aggregate_verify(items: list) -> str:
     return "pass"
 
 
+def _read_text_node(tree, path: str) -> dict:
+    """只读读取文本节点；不写、不产生事件。"""
+    node = tree.FindNode(path)
+    if node is None:
+        return {"state": "missing"}
+    try:
+        return {"state": "read", "value": node.Value, "read_source": "Value(text)"}
+    except Exception as exc:
+        return {"state": "unreadable", "error": str(exc)}
+
+
+def _read_si_node(tree, path: str) -> dict:
+    """只读读取 SI 数值节点（read_si_result）；不写、不产生事件。"""
+    node = tree.FindNode(path)
+    if node is None:
+        return {"state": "missing"}
+    result = read_si_result(node)
+    if result.get("ok"):
+        return {"state": "read", "value": result["value"],
+                "read_source": result.get("read_source")}
+    return {"state": "unreadable", "error": result.get("error")}
+
+
 def _probe_block_nodes(operation, tree) -> dict:
     """只读现状读取；不写、不产生事件。"""
     readings = {}
     for section in ("specs", "values"):
         for key, spec in (operation.get(section) or {}).items():
             path = f"\\Data\\Blocks\\{operation['target']}\\Input\\{key}"
-            node = tree.FindNode(path)
-            if node is None:
-                readings[key] = {"state": "missing"}
-                continue
-            if spec.get("type") == "number":
-                result = read_si_result(node)
-                if result.get("ok"):
-                    readings[key] = {"state": "read", "value": result["value"],
-                                     "read_source": result.get("read_source")}
-                else:
-                    readings[key] = {"state": "unreadable", "error": result.get("error")}
-            else:
-                try:
-                    readings[key] = {"state": "read", "value": node.Value,
-                                     "read_source": "Value(text)"}
-                except Exception as exc:
-                    readings[key] = {"state": "unreadable", "error": str(exc)}
+            readings[key] = (_read_si_node(tree, path) if spec.get("type") == "number"
+                             else _read_text_node(tree, path))
     return readings
 
 
@@ -496,35 +504,19 @@ _FEED_STATE_KEYS = ("BASIS", "TOTAL", "TEMP", "PRES", "VFRAC")
 
 def _probe_feed_nodes(operation, tree) -> dict:
     """只读读取 feed 现状（Input 层级 BASIS/TOTAL/TEMP/PRES/VFRAC 与
-    FLOW\\MIXED 组分 SI 流）；不写、不产生事件。"""
+    FLOW\\MIXED 组分 SI 流）；不写、不产生事件。
+
+    读值仅用于 receipts.current 展示与排障：组合写入能力仍为 unverified，
+    故 _probe_verdict 对 supported=False 恒返回 None（不参与 reuse 判定）。
+    """
     target = operation["target"]
     base = f"\\Data\\Streams\\{target}\\Input"
-
-    def read_text(path):
-        node = tree.FindNode(path)
-        if node is None:
-            return {"state": "missing"}
-        try:
-            return {"state": "read", "value": node.Value, "read_source": "Value(text)"}
-        except Exception as exc:
-            return {"state": "unreadable", "error": str(exc)}
-
-    def read_si(path):
-        node = tree.FindNode(path)
-        if node is None:
-            return {"state": "missing"}
-        result = read_si_result(node)
-        if result.get("ok"):
-            return {"state": "read", "value": result["value"],
-                    "read_source": result.get("read_source")}
-        return {"state": "unreadable", "error": result.get("error")}
-
     readings = {}
     for key in _FEED_STATE_KEYS:
-        readings[key] = read_text(f"{base}\\{key}") if key == "BASIS" \
-            else read_si(f"{base}\\{key}")
+        readings[key] = (_read_text_node(tree, f"{base}\\{key}") if key == "BASIS"
+                         else _read_si_node(tree, f"{base}\\{key}"))
     readings["components"] = {
-        name: read_si(f"{base}\\FLOW\\MIXED\\{name}")
+        name: _read_si_node(tree, f"{base}\\FLOW\\MIXED\\{name}")
         for name in sorted((operation.get("components") or {}))}
     return readings
 
@@ -788,7 +780,7 @@ class ConfigurationEngine:
             readable = all(isinstance(r, dict) and r.get("state") == "read" for r in checks)
             result = dict(readings)
             result["readable"] = bool(readable)
-            result["supported"] = False
+            result["supported"] = False  # 描述性读值：不晋级能力、不参与 reuse 判定
             result["reason"] = ("feed 现状已原生读取；组合写入仍受能力闸门（未原生验证）"
                                 if readable else "feed 现状读取不完整；保守 unknown")
             return result

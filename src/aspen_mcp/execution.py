@@ -21,6 +21,8 @@ import time
 import uuid
 from typing import Any, Callable
 
+from ._directories import default_directory
+
 DEFAULT_DEADLINE_SECONDS = 300.0
 INITIAL_RUN_BUDGET = 1
 MAX_TUNE_RUNS = 3
@@ -31,18 +33,9 @@ MAX_ANALYSIS_RUNS = 50
 
 def default_state_directory() -> str:
     """状态目录：env 优先；cwd 子目录不可写时回落用户可写目录。"""
-    override = os.environ.get("ASPEN_MCP_STATE_DIR")
-    if override:
-        return override
-    cwd_dir = os.path.join(os.getcwd(), ".aspen_mcp_state")
-    try:
-        os.makedirs(cwd_dir, exist_ok=True)
-        return cwd_dir
-    except OSError:
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        fallback = os.path.join(base, "aspen-mcp", "state")
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+    return default_directory(env_var="ASPEN_MCP_STATE_DIR",
+                             cwd_subdir=".aspen_mcp_state",
+                             fallback_subdir="state")
 
 
 class ExecutionLedger:

@@ -651,11 +651,20 @@ def tool_simulation_warnings(random_string: str | None = None) -> list[str]:
             enumeration_interrupted = False
 
             def _enumerate(container, limit):
-                """Yield child nodes; IndexError/None end cleanly, other errors flag UNKNOWN."""
+                """Yield child nodes; Count 优先，无 Count 通道时按上限探测。
+
+                None/IndexError 视为正常结束；其他错误标记枚举中断（UNKNOWN）。
+                """
                 nonlocal enumeration_interrupted
-                for idx in range(limit):
+                collection = container.Elements
+                count = limit
+                try:
+                    count = min(int(collection.Count), limit)
+                except Exception:
+                    pass  # 无 Count 通道：回退按上限探测，以 None/越界结束
+                for idx in range(count):
                     try:
-                        child = container.Elements(idx)
+                        child = collection(idx)
                     except IndexError:
                         return
                     except Exception:
