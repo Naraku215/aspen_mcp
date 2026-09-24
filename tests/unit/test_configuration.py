@@ -403,3 +403,40 @@ def test_feed_applied_with_verified_adapter(engine):
     assert receipt["verify_status"] == "pass"
     assert adapter.events == ["basis", "total", "component:A", "component:B"]
     assert adapter.components == {"A": 0.4, "B": 0.6}
+
+
+def test_feed_inspect_reads_native_current_state(engine, node_class):
+    mount(engine.tree, node_class, r"\Data\Streams\FEED\Input\BASIS", value="MOLE-FRAC")
+    mount(engine.tree, node_class, r"\Data\Streams\FEED\Input\TOTAL", row=0, col=0, value=1.0)
+    mount(engine.tree, node_class, r"\Data\Streams\FEED\Input\TEMP", row=22, value=30)
+    mount(engine.tree, node_class, r"\Data\Streams\FEED\Input\PRES", row=20, value=10)
+    mount(engine.tree, node_class, r"\Data\Streams\FEED\Input\FLOW\MIXED\A", row=11, value=0.4)
+    mount(engine.tree, node_class, r"\Data\Streams\FEED\Input\FLOW\MIXED\B", row=11, value=0.6)
+    batch = manifest(feed("f1", components={"A": 0.4, "B": 0.6}, basis="MOLE-FRAC",
+                          total=1.0, total_basis="MOLE-FLOW"))
+    preview = engine.engine.inspect(batch)
+    assert preview["status"] == "ok"
+    receipt = preview["receipts"][0]
+    current = receipt["current"]
+    assert receipt["decision"] == "would_apply"
+    assert current["supported"] is False
+    assert current["readable"] is True
+    assert current["BASIS"]["state"] == "read"
+    assert current["BASIS"]["value"] == "MOLE-FRAC"
+    assert current["TOTAL"]["state"] == "read" and current["TOTAL"]["value"] == 1.0
+    assert current["components"]["A"]["state"] == "read"
+    assert current["components"]["A"]["value"] == 0.4
+    assert "能力闸门" in current["reason"]
+    assert engine.ledger.read_entries() == []
+
+
+def test_feed_inspect_missing_stream_is_not_readable(engine):
+    batch = manifest(feed("f1", components={"A": 0.4, "B": 0.6}, basis="MOLE-FRAC",
+                          total=1.0, total_basis="MOLE-FLOW"))
+    preview = engine.engine.inspect(batch)
+    receipt = preview["receipts"][0]
+    assert receipt["decision"] == "would_apply"
+    assert receipt["current"]["supported"] is False
+    assert receipt["current"]["readable"] is False
+    assert "保守 unknown" in receipt["current"]["reason"]
+    assert engine.ledger.read_entries() == []

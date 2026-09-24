@@ -491,6 +491,44 @@ def _probe_block_nodes(operation, tree) -> dict:
     return readings
 
 
+_FEED_STATE_KEYS = ("BASIS", "TOTAL", "TEMP", "PRES", "VFRAC")
+
+
+def _probe_feed_nodes(operation, tree) -> dict:
+    """只读读取 feed 现状（Input 层级 BASIS/TOTAL/TEMP/PRES/VFRAC 与
+    FLOW\\MIXED 组分 SI 流）；不写、不产生事件。"""
+    target = operation["target"]
+    base = f"\\Data\\Streams\\{target}\\Input"
+
+    def read_text(path):
+        node = tree.FindNode(path)
+        if node is None:
+            return {"state": "missing"}
+        try:
+            return {"state": "read", "value": node.Value, "read_source": "Value(text)"}
+        except Exception as exc:
+            return {"state": "unreadable", "error": str(exc)}
+
+    def read_si(path):
+        node = tree.FindNode(path)
+        if node is None:
+            return {"state": "missing"}
+        result = read_si_result(node)
+        if result.get("ok"):
+            return {"state": "read", "value": result["value"],
+                    "read_source": result.get("read_source")}
+        return {"state": "unreadable", "error": result.get("error")}
+
+    readings = {}
+    for key in _FEED_STATE_KEYS:
+        readings[key] = read_text(f"{base}\\{key}") if key == "BASIS" \
+            else read_si(f"{base}\\{key}")
+    readings["components"] = {
+        name: read_si(f"{base}\\FLOW\\MIXED\\{name}")
+        for name in sorted((operation.get("components") or {}))}
+    return readings
+
+
 def _expected_si(spec) -> float | None:
     try:
         value = finite_number(spec.get("value"))
@@ -735,8 +773,25 @@ class ConfigurationEngine:
 
     def _probe_current(self, operation):
         if operation.get("kind") == "feed":
-            return {"supported": False,
-                    "reason": "feed 现状核验需原生适配器读取；未知组合返回 unknown"}
+            bridge = self._bridge_instance()
+
+            def callback():
+                tree = bridge._app.RootModel("")
+                return _probe_feed_nodes(operation, tree)
+
+            try:
+                readings = bridge.call(callback)
+            except Exception as exc:
+                return {"error": f"{type(exc).__name__}: {exc}", "supported": False}
+            checks = [readings.get("BASIS"), readings.get("TOTAL")]
+            checks += list((readings.get("components") or {}).values())
+            readable = all(isinstance(r, dict) and r.get("state") == "read" for r in checks)
+            result = dict(readings)
+            result["readable"] = bool(readable)
+            result["supported"] = False
+            result["reason"] = ("feed 现状已原生读取；组合写入仍受能力闸门（未原生验证）"
+                                if readable else "feed 现状读取不完整；保守 unknown")
+            return result
         bridge = self._bridge_instance()
 
         def callback():
