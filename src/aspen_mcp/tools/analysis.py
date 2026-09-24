@@ -483,13 +483,17 @@ def tool_set_tear_estimate(stream_name: str, temp: float | None = None,
 
         parts = []
         if temp is not None:
-            aspen.set_value(temp, "Data", "Streams", stream_name, "Input", "TEMP", "MIXED")
+            if not aspen.set_value(temp, "Data", "Streams", stream_name, "Input", "TEMP", "MIXED"):
+                return f"Error: TEMP 写入被拒绝（流股 '{stream_name}'），撕裂流估计未设置"
             parts.append(f"TEMP={temp}")
         if pres is not None:
-            aspen.set_value(pres, "Data", "Streams", stream_name, "Input", "PRES", "MIXED")
+            if not aspen.set_value(pres, "Data", "Streams", stream_name, "Input", "PRES", "MIXED"):
+                return f"Error: PRES 写入被拒绝（流股 '{stream_name}'），撕裂流估计未设置"
             parts.append(f"PRES={pres}")
         if total_flow is not None:
-            aspen.set_value(total_flow, "Data", "Streams", stream_name, "Input", "TOTAL", "MIXED")
+            if not aspen.set_value(total_flow, "Data", "Streams", stream_name, "Input", "TOTAL", "MIXED"):
+                return ("Error: TOTAL 写入被拒绝（未验证流股总量契约）；"
+                        "请改用 set_stream_composition_batch 的 total_basis 独立总量接口")
             parts.append(f"TOTAL={total_flow}")
         if parts:
             return f"Tear stream '{stream_name}' estimate set: {', '.join(parts)}"

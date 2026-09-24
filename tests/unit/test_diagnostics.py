@@ -347,3 +347,34 @@ def test_export_report_file_creates_parent_and_reports_size(monkeypatch, tmp_pat
     result = analysis.tool_export_report_file(target)
     assert result.endswith("(10 bytes)")
     assert (tmp_path / "sub" / "report.txt").exists()
+
+
+# ── 撕裂流估计：写被拒绝必须显式报错，不得谎报成功 ──────────────────────────
+
+def test_tear_estimate_reports_rejected_total_write(fake_windows, monkeypatch):
+    from aspen_mcp.tools import analysis
+
+    bridge, _tree = fake_windows
+    calls = []
+
+    def record_call(fn):
+        calls.append(fn)
+        return fn()
+
+    bridge.call = record_call
+    monkeypatch.setattr(analysis, "aspen", bridge)
+    result = analysis.tool_set_tear_estimate("FEED", total_flow=100.0)
+    assert result.startswith("Error"), result
+    assert "TOTAL" in result
+    assert calls == []  # 守卫在进入 COM 之前拒绝
+
+
+def test_tear_estimate_still_reports_writable_param(fake_windows, node_class, monkeypatch):
+    from aspen_mcp.tools import analysis
+
+    bridge, tree = fake_windows
+    monkeypatch.setattr(analysis, "aspen", bridge)
+    tree.mount(r"\Data\Streams\FEED\Input\TEMP\MIXED", node_class("MIXED", row=22))
+    result = analysis.tool_set_tear_estimate("FEED", temp=150.0)
+    assert result.startswith("Tear stream 'FEED' estimate set")
+    assert "TEMP=150" in result

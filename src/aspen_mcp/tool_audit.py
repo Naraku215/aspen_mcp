@@ -12,6 +12,7 @@ import functools
 import hashlib
 import inspect
 import json
+import logging
 import os
 import threading
 import time
@@ -22,6 +23,8 @@ from typing import Any, Callable
 _ATTACHMENT_THRESHOLD = 64_000
 _SENSITIVE_KEYS = {"password", "passwd", "token", "secret", "credential", "api_key"}
 _ERROR_STATUSES = {"failed", "unsupported", "partial_failure"}
+
+_logger = logging.getLogger(__name__)
 
 
 def default_audit_directory() -> str:
@@ -49,8 +52,16 @@ def _redact(value: Any) -> Any:
     return value
 
 
+def _dump(value: Any) -> str:
+    """尽力序列化：标准 JSON 优先，NaN/Inf 等降级为 Python 方言。"""
+    try:
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, default=str)
+    except (TypeError, ValueError):
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+
 def _jsonable(value: Any) -> str:
-    return json.dumps(_redact(value), ensure_ascii=False, allow_nan=False, default=str)
+    return _dump(_redact(value))
 
 
 def _outcome_of(result: Any) -> str:
@@ -81,13 +92,17 @@ class AuditLog:
 
     # ── 存储 ────────────────────────────────────────────────────────────
     def _append(self, entry: dict) -> None:
+        """审计落盘是旁路能力：失败降级为警告，不影响业务调用。"""
         with self._lock:
             self._entries.append(entry)
-            os.makedirs(self.directory, exist_ok=True)
-            with open(self._index_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False, allow_nan=False, default=str) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            try:
+                os.makedirs(self.directory, exist_ok=True)
+                with open(self._index_path, "a", encoding="utf-8") as handle:
+                    handle.write(_dump(entry) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception as exc:
+                _logger.warning("审计落盘失败（已降级）: %s", exc)
 
     def read_entries(self) -> list[dict]:
         with self._lock:
@@ -107,10 +122,15 @@ class AuditLog:
         return {"__attachment__": True, "path": path, "sha256": digest, "bytes": len(text)}
 
     def _summarize(self, call_id: str, payload: Any) -> Any:
-        text = _jsonable(payload)
-        if len(text) > _ATTACHMENT_THRESHOLD:
-            return self._write_attachment(call_id, payload)
-        return json.loads(text)
+        """摘要失败降级为占位符，绝不因审计中断业务返回。"""
+        try:
+            text = _jsonable(payload)
+            if len(text) > _ATTACHMENT_THRESHOLD:
+                return self._write_attachment(call_id, payload)
+            return json.loads(text)
+        except Exception as exc:
+            _logger.warning("审计摘要降级: %s", exc)
+            return "<unserializable>"
 
     # ── 注册 wrapper ────────────────────────────────────────────────────
     def wrap_tool(self, fn: Callable, *, name: str | None = None,

@@ -3,6 +3,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import math
 import os
 
 import pytest
@@ -160,3 +161,36 @@ def test_default_audit_directory_falls_back_when_cwd_unwritable(monkeypatch, tmp
     result = default_audit_directory()
     assert result == str(tmp_path / "local" / "aspen-mcp" / "audit")
     assert os.path.isdir(result)
+
+
+def test_audit_disk_failure_does_not_break_tool(tmp_path):
+    module = audit()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")  # 文件占据目录位置 → 落盘必失败
+    log = module.AuditLog(directory=str(blocker))
+    wrapped = log.wrap_tool(lambda: "OK: fine", name="degraded")
+    assert wrapped() == "OK: fine"
+    assert [e["event"] for e in log.read_entries()] == ["request", "response"]
+
+
+def test_audit_disk_failure_does_not_mask_tool_exception(tmp_path):
+    module = audit()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    log = module.AuditLog(directory=str(blocker))
+
+    def boom() -> None:
+        raise ValueError("原始错误")
+
+    wrapped = log.wrap_tool(boom, name="boom_degraded")
+    with pytest.raises(ValueError, match="原始错误"):
+        wrapped()
+
+
+def test_nan_result_is_recorded_without_breaking_tool(log):
+    wrapped = log.wrap_tool(lambda: {"ok": True, "value": float("nan")}, name="nan")
+    result = wrapped()
+    assert result["ok"] is True
+    entry = log.read_entries()[-1]
+    assert entry["outcome"] == "ok"
+    assert math.isnan(entry["result"]["value"])
